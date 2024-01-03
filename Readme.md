@@ -1,6 +1,9 @@
 # PicoDVI-DMG  
 
-## This project allows Gameboy DMG DVI output via HDMI using PicoDVI
+## This project allows Gameboy DMG DVI output via HDMI using PicoDVI  
+
+NOTE:  I do have a version with HDMI audio working... but it doesn't work very well! :(  
+If you think you might be able to help with the audio portion feel free to message me (my username at protonmail.com)  
 
 ![gameplay preview](./images/gameplay.gif?raw=true)  
 
@@ -9,6 +12,8 @@
 ![dmg theme](./images/preview_dmg.jpg?raw=true)  
 
 ![gbp theme](./images/preview_gbp.jpg?raw=true)  
+
+![pcb rev 1](./images/pcb_rev1.jpg?raw=true)  
 
 
 
