@@ -40,28 +40,39 @@
 
 #include "mario.h"
 
+#include "hardware/adc.h"
+#include "hardware/pwm.h"
+#include "analog_microphone.h"
+#include "emusound.h"
+
+static const int hdmi_n[3] = {4096, 6272, 6144};
+static uint16_t  rate = SAMPLE_FREQ;
+// #define AUDIO_BUFFER_SIZE   (0x1<<8) // Must be power of 2
+audio_sample_t      audio_buffer[AUDIO_BUFFER_SIZE];
+
 #define DEBUG_BUTTON_PRESS   // Illuminate LED on button presses
 
 #define ONBOARD_LED_PIN             25
 
 // GAMEBOY VIDEO INPUT (From level shifter)
-#define VSYNC_PIN                   0
-#define PIXEL_CLOCK_PIN             1
+
+#define HSYNC_PIN                   0
+#define DATA_1_PIN                  1
 #define DATA_0_PIN                  2
-#define DATA_1_PIN                  3
-#define HSYNC_PIN                   4
+#define PIXEL_CLOCK_PIN             3
+#define VSYNC_PIN                   4
+#define DMG_READING_BUTTONS_PIN     5       // P15
+#define DMG_READING_DPAD_PIN        6       // P14
+#define DMG_OUTPUT_RIGHT_A_PIN      7       // P10
+#define DMG_OUTPUT_UP_SELECT_PIN    8       // P12
+#define DMG_OUTPUT_DOWN_START_PIN   9       // P13
+#define DMG_OUTPUT_LEFT_B_PIN       10      // P11
 
-#define DMG_OUTPUT_RIGHT_A_PIN      5       // P10
-#define DMG_OUTPUT_LEFT_B_PIN       6       // P11
-#define DMG_OUTPUT_UP_SELECT_PIN    7       // P12
-#define DMG_OUTPUT_DOWN_START_PIN   8       // P13
-#define DMG_READING_DPAD_PIN        9       // P14
-#define DMG_READING_BUTTONS_PIN     10      // P15
-
+// the bit order coincides with the pin order
 #define BIT_RIGHT_A                 (1<<0)  // P10
-#define BIT_LEFT_B                  (1<<1)  // P11
-#define BIT_UP_SELECT               (1<<2)  // P12
-#define BIT_DOWN_START              (1<<3)  // P13
+#define BIT_UP_SELECT               (1<<1)  // P12
+#define BIT_DOWN_START              (1<<2)  // P13
+#define BIT_LEFT_B                  (1<<3)  // P11
 
 // I2C Pins, etc. -- for I2C controller
 #define SDA_PIN                     26
@@ -79,8 +90,8 @@ static uint8_t framebuffer_previous[DMG_PIXEL_COUNT] = {0};
 static uint8_t* pixel_active;
 static uint8_t* pixel_old;
 static bool frameblending_enabled = true;
-static bool __no_inline_not_in_flash_func(nes_classic_controller)(void);
-// static bool nes_classic_controller(void);
+
+
 
 typedef enum
 {
@@ -115,10 +126,25 @@ static uint8_t button_states_previous[BUTTON_COUNT];
 #define FRAME_WIDTH 800
 #define FRAME_HEIGHT 150    // (x4 via DVI_VERTICAL_REPEAT)
 
-// TMDS bit clock 252 MHz
-// DVDD 1.2V (1.1V seems ok too)
-#define VREG_VSEL VREG_VOLTAGE_1_30
-#define DVI_TIMING dvi_timing_800x600p_60hz
+const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
+	.h_sync_polarity   = false,
+	.h_front_porch     = 44,
+	.h_sync_width      = 128,
+	.h_back_porch      = 88,
+	.h_active_pixels   = 800,
+
+	.v_sync_polarity   = false,
+	.v_front_porch     = 2,        // increased from 1
+	.v_sync_width      = 4,
+	.v_back_porch      = 22,
+	.v_active_lines    = 600,
+
+	.bit_clk_khz       = 280000     // 400K .... toooo much!
+};
+
+#define VREG_VSEL VREG_VOLTAGE_1_20
+#define DVI_TIMING dvi_timing_800x600p_60hz_280K
+
 
 // // UART config on the last GPIOs
 // #define UART_TX_PIN (28)
@@ -157,12 +183,40 @@ uint8_t* game_palette = colors__gbp_nso;
 
 uint8_t background_color = RGB888_TO_RGB332(0x00, 0x00, 0xFF);
 
-// static long map(long x, long in_min, long in_max, long out_min, long out_max);
+
+// configuration
+const struct analog_microphone_config mic_config = {
+    // GPIO to use for input, must be ADC compatible (GPIO 26 - 28)
+    .gpio = 28,
+
+    // bias voltage of microphone in volts
+    // .bias_voltage = 1.25,
+	// .bias_voltage = 6.6,
+	.bias_voltage = 0,
+
+
+    // sample rate in Hz
+    // .sample_rate = 44100,
+    .sample_rate = SAMPLE_FREQ,
+
+    // number of samples to buffer
+    .sample_buffer_size = AUDIO_BUFFER_SIZE,
+};
+// variables
+int16_t sample_buffer[AUDIO_BUFFER_SIZE];
+volatile int samples_read = 0;
+static void on_analog_samples_ready(void);
+// static void __not_in_flash_func(on_analog_samples_ready)(void);
+static long map(long x, long in_min, long in_max, long out_min, long out_max);
 
 static void initialize_gpio(void);
 static void initialize_pio_program(void);
 static void __no_inline_not_in_flash_func(gpio_callback_VIDEO)(uint gpio, uint32_t events);
-static void read_pixel(void);
+// static void read_pixel(void);
+static void __not_in_flash_func(read_pixel)(void);
+static bool __no_inline_not_in_flash_func(nes_classic_controller)(void);
+// static bool nes_classic_controller(void);
+static void __no_inline_not_in_flash_func(core1_scanline_callback)(void);
 
 void core1_main(void)
 {
@@ -197,7 +251,8 @@ void core1_main(void)
     __builtin_unreachable();
 }
 
-void core1_scanline_callback(void)
+// void core1_scanline_callback(void)
+static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
 {
     // Note first two scanlines are pushed before DVI start
     static uint scanline = 2;
@@ -249,12 +304,8 @@ int main(void)
 {
     vreg_set_voltage(VREG_VSEL);
     sleep_ms(10);
-#ifdef RUN_FROM_CRYSTAL
-    set_sys_clock_khz(12000, true);
-#else
-    // Run system at TMDS bit clock (252.000 MHz)
+
     set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
-#endif
 
     // preload an image (160x144) into the framebuffer
     memcpy(framebuffer_active, mario_lut_160x144, sizeof(framebuffer_active));
@@ -264,8 +315,40 @@ int main(void)
 
     dvi0.timing = &DVI_TIMING;
     dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
-    dvi0.scanline_callback = core1_scanline_callback;
+    dvi0.scanline_callback = (dvi_callback_t*)core1_scanline_callback;
     dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
+
+
+        // HDMI Audio related
+    int offset = rate == 48000 ? 2 : (rate == 44100) ? 1 : 0;
+    int cts = dvi0.timing->bit_clk_khz*hdmi_n[offset]/(rate/100)/128;
+    dvi_get_blank_settings(&dvi0)->top    = 0;
+    dvi_get_blank_settings(&dvi0)->bottom = 0;
+    dvi_audio_sample_buffer_set(&dvi0, audio_buffer, AUDIO_BUFFER_SIZE);
+    dvi_set_audio_freq(&dvi0, rate, cts, hdmi_n[offset]);
+    increase_write_pointer(&dvi0.audio_ring,AUDIO_BUFFER_SIZE -1);
+
+	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer); // dunno
+
+
+// ------------------------------------------------------------------------------
+ // initialize the analog microphone
+    if (analog_microphone_init(&mic_config) < 0) {
+        printf("analog microphone initialization failed!\n");
+        while (1) { tight_loop_contents(); }
+    }
+
+    // set callback that is called when all the samples in the library
+    // internal sample buffer are ready for reading
+    analog_microphone_set_samples_ready_handler(on_analog_samples_ready);
+
+	    // start capturing data from the analog microphone
+    if (analog_microphone_start() < 0) 
+	{
+        printf("PDM microphone start failed!\n");
+        while (1) { tight_loop_contents();  }
+    }
+	// ------------------------------------------------------------------------------
 
     uint32_t *bufptr = (uint32_t*)line_buffer;
     queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
@@ -281,23 +364,45 @@ int main(void)
 
     gpio_set_irq_enabled_with_callback(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true, &gpio_callback_VIDEO);
 
+
+
     while (true) 
     {
-        // pio_sm_clear_fifos(pio, state_machine);
+        // for (uint y = 0; y < FRAME_HEIGHT; ++y) {
+		// 	uint16_t *pixbuf;
+		// 	queue_remove_blocking(&dvi0.q_colour_free, &pixbuf);
+		// 	// // sprite_blit16(pixbuf, (const uint16_t *)testcard_320x240 + (y + frame_ctr / 2) % 240 * FRAME_WIDTH, 320);
+		// 	// sprite_fill16(pixbuf, 0x07ff, FRAME_WIDTH);
+		// 	// for (int i = 0; i < N_BERRIES; ++i)
+		// 	// 	// sprite_asprite16(pixbuf, &berry[i], atrans[i], y, FRAME_WIDTH);
+		// 	// 	sprite_sprite16(pixbuf, &berry[i], y, FRAME_WIDTH);
+		// 	queue_add_blocking(&dvi0.q_colour_valid, &pixbuf);
+		// }
         nes_classic_controller();
         pio_sm_put(pio_dmg, state_machine, pio_out_value);
     }
     __builtin_unreachable();
 }
 
-// static long map(long x, long in_min, long in_max, long out_min, long out_max)
-// {
-//   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-// }
+// static void __not_in_flash_func(on_analog_samples_ready)(void)
+static void on_analog_samples_ready(void)
+{
+    // callback from library when all the samples in the library
+    // internal sample buffer are ready for reading 
+
+    samples_read = analog_microphone_read(sample_buffer, AUDIO_BUFFER_SIZE);
+    
+	
+}
+
+static long map(long x, long in_min, long in_max, long out_min, long out_max)
+{
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
 static void initialize_pio_program(void)
 {
-    static const uint start_in_pin = DMG_READING_DPAD_PIN;
+    static const uint start_in_pin = DMG_READING_BUTTONS_PIN;
     static const uint start_out_pin = DMG_OUTPUT_RIGHT_A_PIN;
 
     // Get first free state machine in PIO 0
@@ -390,7 +495,8 @@ static void __no_inline_not_in_flash_func(gpio_callback_VIDEO)(uint gpio, uint32
     }
 }
 
-static void read_pixel(void)
+// static void read_pixel(void)
+static void __not_in_flash_func(read_pixel)(void)
 {
     uint8_t new_value = (gpio_get(DATA_0_PIN) << 1) + gpio_get(DATA_1_PIN);
     *pixel_active++ = frameblending_enabled ? (new_value == 0 ? new_value|*pixel_old : new_value) : new_value;

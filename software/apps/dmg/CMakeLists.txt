@@ -4,7 +4,11 @@
 
 add_executable(dmg
 	main.c
+	analog_microphone.c
+	emusound.c
 )
+
+target_compile_options(dmg PRIVATE -Wall)
 
 target_compile_definitions(dmg PRIVATE
 	DVI_DEFAULT_SERIAL_CONFIG=${DVI_DEFAULT_SERIAL_CONFIG}
@@ -21,6 +25,8 @@ target_link_libraries(dmg
 	hardware_pio
 	hardware_i2c
 	hardware_irq
+	hardware_adc
+	hardware_dma
 )
 
 # Build pio
