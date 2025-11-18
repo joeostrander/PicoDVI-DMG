@@ -6,6 +6,7 @@ add_executable(dmg
 	main.c
 	analog_microphone.c
 	emusound.c
+	pio_audio_timer.c
 )
 
 target_compile_options(dmg PRIVATE -Wall)
@@ -29,8 +30,14 @@ target_link_libraries(dmg
 	hardware_dma
 )
 
-# Build pio
+# Enable USB serial output for printf debugging
+pico_enable_stdio_usb(dmg 1)
+pico_enable_stdio_uart(dmg 0)
+
+# Build pio programs
 pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/dmg.pio)
+pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/audio_timer.pio)
+pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/video_capture.pio)
 
 
 # create map/bin/hex file etc.

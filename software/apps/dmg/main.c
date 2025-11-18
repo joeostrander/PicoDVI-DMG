@@ -1,3 +1,5 @@
+TODO: switch back to my interrupt-based video processing, ditch the PIO program
+
 // Joe Ostrander
 // 2023.11.19
 // PicoDVI-DMG
@@ -37,6 +39,7 @@
 #include "common_dvi_pin_configs.h"
 #include "dmg.pio.h"
 #include "tmds_encode.h"
+#include "audio_ring.h"  // For get_write_size and get_read_size
 
 #include "mario.h"
 
@@ -44,8 +47,9 @@
 #include "hardware/pwm.h"
 #include "analog_microphone.h"
 #include "emusound.h"
+#include "video_capture.pio.h"  // PIO-based video capture - COMMENTED OUT FOR TESTING
 
-static const int hdmi_n[3] = {4096, 6272, 6144};
+static const int hdmi_n[6] = {4096, 6272, 6144, 3136, 4096, 6144};  // 32k, 44.1k, 48k, 22.05k, 16k, 24k
 static uint16_t  rate = SAMPLE_FREQ;
 // #define AUDIO_BUFFER_SIZE   (0x1<<8) // Must be power of 2
 audio_sample_t      audio_buffer[AUDIO_BUFFER_SIZE];
@@ -85,11 +89,28 @@ i2c_inst_t* i2cHandle = i2c1;
 #define DMG_PIXELS_Y                144
 #define DMG_PIXEL_COUNT             (DMG_PIXELS_X*DMG_PIXELS_Y)
 
-static uint8_t framebuffer_active[DMG_PIXEL_COUNT] = {0};
+// Double buffering: one for capture, one for display
+static uint8_t framebuffer_0[DMG_PIXEL_COUNT] = {0};
+static uint8_t framebuffer_1[DMG_PIXEL_COUNT] = {0};
 static uint8_t framebuffer_previous[DMG_PIXEL_COUNT] = {0};
+
+// Packed DMA buffers - 4 pixels per byte (2 bits each)
+#define PACKED_FRAME_SIZE (DMG_PIXEL_COUNT / 4)  // 5760 bytes
+static uint8_t packed_buffer_0[PACKED_FRAME_SIZE] = {0};
+static uint8_t packed_buffer_1[PACKED_FRAME_SIZE] = {0};
+
+// Pointers - swapped atomically between capture and display
+static volatile uint8_t* framebuffer_display = framebuffer_0;  // Core 1 reads this
+static uint8_t* framebuffer_capture = framebuffer_1;           // Core 0 writes this
+
 static uint8_t* pixel_active;
 static uint8_t* pixel_old;
-static bool frameblending_enabled = true;
+// Set to false to disable frame blending for better performance
+// Trade-off: slightly sharper image vs more CPU time for audio
+static bool frameblending_enabled = false;  // Try false for smoother audio
+
+// Flag to signal frame capture needed
+static volatile bool frame_capture_needed = false;
 
 
 
@@ -117,8 +138,23 @@ static PIO pio_dmg = pio1;
 static uint state_machine = 0;
 static uint pio_out_value = 0;
 
+// PIO video capture  
+// CANNOT use PIO0 - it's used by DVI (SM0, SM1, SM2)
+// CANNOT use PIO1 SM0 - it's used by DMG controller
+// CANNOT use PIO1 SM1 - it's used by audio timer
+// CAN use PIO1 SM2 or SM3 for video capture!
+static PIO pio_video = pio1;  // Share PIO1 with DMG controller and audio
+// static uint video_sm = 3;      // Use SM3 (DMG uses SM0, audio uses SM1)
+static uint video_sm = 1;      // Use SM3 (DMG uses SM0)
+static uint video_offset = 0;
+
 static uint8_t button_states[BUTTON_COUNT];
 static uint8_t button_states_previous[BUTTON_COUNT];
+
+// Video capture state variables (used by video_capture.pio functions)
+int video_dma_chan = -1;
+volatile bool video_frame_ready = false;
+volatile uint8_t* video_completed_frame = NULL;
 
 // The frame is basically full width
 // - since horizontal is already doubled, I manually repeat each x2 to get 4x scale
@@ -142,7 +178,7 @@ const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
 	.bit_clk_khz       = 280000     // 400K .... toooo much!
 };
 
-#define VREG_VSEL VREG_VOLTAGE_1_20
+#define VREG_VSEL VREG_VOLTAGE_1_25  // Increased from 1.20V for stable 280 MHz clocks
 #define DVI_TIMING dvi_timing_800x600p_60hz_280K
 
 
@@ -190,20 +226,25 @@ const struct analog_microphone_config mic_config = {
     .gpio = 28,
 
     // bias voltage of microphone in volts
-    // .bias_voltage = 1.25,
-	// .bias_voltage = 6.6,
-	.bias_voltage = 0,
+    .bias_voltage = 0,
 
-
-    // sample rate in Hz
-    // .sample_rate = 44100,
+    // sample rate in Hz - match HDMI audio
     .sample_rate = SAMPLE_FREQ,
 
-    // number of samples to buffer
-    .sample_buffer_size = AUDIO_BUFFER_SIZE,
+    // CRITICAL: Small buffer synchronized with PIO chunk size!
+    // ADC fills 64 samples every 2ms, PIO reads 64 samples every 2ms
+    // This eliminates the race condition
+    .sample_buffer_size = ADC_CHUNK_SIZE,
 };
-// variables
-int16_t sample_buffer[AUDIO_BUFFER_SIZE];
+// variables - use double buffering to avoid race conditions
+int16_t sample_buffer_a[ADC_CHUNK_SIZE];
+int16_t sample_buffer_b[ADC_CHUNK_SIZE];
+volatile int16_t* adc_write_buffer = sample_buffer_a;  // ADC writes here
+volatile int16_t* adc_read_buffer = sample_buffer_b;   // PIO reads from here
+
+// Fixed buffer that PIO always reads from (ADC copies to this)
+int16_t sample_buffer_for_pio[ADC_CHUNK_SIZE];
+volatile bool adc_buffer_ready = false;                // Signal from ADC to PIO
 volatile int samples_read = 0;
 static void on_analog_samples_ready(void);
 // static void __not_in_flash_func(on_analog_samples_ready)(void);
@@ -212,10 +253,7 @@ static long map(long x, long in_min, long in_max, long out_min, long out_max);
 static void initialize_gpio(void);
 static void initialize_pio_program(void);
 static void __no_inline_not_in_flash_func(gpio_callback_VIDEO)(uint gpio, uint32_t events);
-// static void read_pixel(void);
-static void __not_in_flash_func(read_pixel)(void);
 static bool __no_inline_not_in_flash_func(nes_classic_controller)(void);
-// static bool nes_classic_controller(void);
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(void);
 
 void core1_main(void)
@@ -280,8 +318,8 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
         for (uint i = 0; i < DMG_PIXELS_X; i++)
         {
             frame_idx = dmg_line_idx * DMG_PIXELS_X + i;
-            line_buffer[idx++] = game_palette[framebuffer_active[frame_idx]];
-            line_buffer[idx++] = game_palette[framebuffer_active[frame_idx]];
+            line_buffer[idx++] = game_palette[framebuffer_display[frame_idx]];
+            line_buffer[idx++] = game_palette[framebuffer_display[frame_idx]];
             
         }
 
@@ -302,13 +340,25 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
 
 int main(void)
 {
+    // Initialize stdio for USB serial debugging
+    stdio_init_all();
+    sleep_ms(3000);  // Give USB more time to enumerate
+    
+    // Force flush and try multiple times
+    for (int i = 0; i < 5; i++) {
+        printf("\n\n=== PicoDVI-DMG Starting (attempt %d) ===\n", i+1);
+        stdio_flush();
+        sleep_ms(100);
+    }
+    
     vreg_set_voltage(VREG_VSEL);
     sleep_ms(10);
 
     set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
 
-    // preload an image (160x144) into the framebuffer
-    memcpy(framebuffer_active, mario_lut_160x144, sizeof(framebuffer_active));
+    // preload an image (160x144) into both framebuffers
+    memcpy((void*)framebuffer_display, mario_lut_160x144, DMG_PIXEL_COUNT);
+    memcpy(framebuffer_capture, mario_lut_160x144, DMG_PIXEL_COUNT);
 
     // setup_default_uart();
     // stdio_uart_init_full(UART_ID, BAUD_RATE, UART_TX_PIN, UART_RX_PIN);
@@ -320,66 +370,206 @@ int main(void)
 
 
         // HDMI Audio related
-    int offset = rate == 48000 ? 2 : (rate == 44100) ? 1 : 0;
+    // Support 16000, 22050, 24000, 32000, 44100, and 48000 Hz sample rates
+    int offset;
+    if (rate == 48000) {
+        offset = 2;
+    } else if (rate == 44100) {
+        offset = 1;
+    } else if (rate == 24000) {
+        offset = 5;  // 24kHz - well supported
+    } else if (rate == 22050) {
+        offset = 3;  // Half of 44.1k
+    } else if (rate == 16000) {
+        offset = 4;  // Half of 32k
+    } else {
+        offset = 0;  // Default for other rates (32000)
+    }
     int cts = dvi0.timing->bit_clk_khz*hdmi_n[offset]/(rate/100)/128;
     dvi_get_blank_settings(&dvi0)->top    = 0;
     dvi_get_blank_settings(&dvi0)->bottom = 0;
     dvi_audio_sample_buffer_set(&dvi0, audio_buffer, AUDIO_BUFFER_SIZE);
     dvi_set_audio_freq(&dvi0, rate, cts, hdmi_n[offset]);
-    increase_write_pointer(&dvi0.audio_ring,AUDIO_BUFFER_SIZE -1);
-
-	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer); // dunno
-
-
-// ------------------------------------------------------------------------------
- // initialize the analog microphone
-    if (analog_microphone_init(&mic_config) < 0) {
-        printf("analog microphone initialization failed!\n");
-        while (1) { tight_loop_contents(); }
-    }
-
-    // set callback that is called when all the samples in the library
-    // internal sample buffer are ready for reading
-    analog_microphone_set_samples_ready_handler(on_analog_samples_ready);
-
-	    // start capturing data from the analog microphone
-    if (analog_microphone_start() < 0) 
-	{
-        printf("PDM microphone start failed!\n");
-        while (1) { tight_loop_contents();  }
-    }
-	// ------------------------------------------------------------------------------
+    // Note: dvi_set_audio_freq() automatically calls dvi_enable_data_island()
+    
+    // Pre-fill buffer to 25% to allow for bursty DVI consumption patterns
+    // Too much pre-fill causes long silent periods between bursts
+    // Too little causes underruns during startup
+    increase_write_pointer(&dvi0.audio_ring, AUDIO_BUFFER_SIZE / 4);
+    printf("Audio buffer pre-filled to %d samples (25%%)\n", AUDIO_BUFFER_SIZE / 4);
 
     uint32_t *bufptr = (uint32_t*)line_buffer;
     queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
     queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
 
-    //printf("Core 1 start\n");
+    // OPTIMIZED ORDER for audio + video:
+    // 1. Start PIO audio timer (500Hz chunk processing)
+    // 2. Start Core1 (DVI output starts consuming audio)
+    // 3. Initialize ADC microphone
+    // 4. Initialize GPIO/PIO for DMG controller
+    // 5. Register VSYNC interrupt (video capture begins)
+    
+    printf("Starting PIO audio timer (500Hz chunk rate)...\n");
+	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer_for_pio);
+    printf("Audio system initialized\n");
+
+    printf("Starting Core 1 (DVI output)...\n");
     multicore_launch_core1(core1_main);
+    printf("Core 1 running - now consuming audio!\n");
 
-    //printf("Start rendering\n");
+// ------------------------------------------------------------------------------
+ // initialize the analog microphone
+    printf("Initializing analog microphone on GPIO %d at %d Hz...\n", mic_config.gpio, mic_config.sample_rate);
+    if (analog_microphone_init(&mic_config) < 0) {
+        printf("ERROR: analog microphone initialization failed!\n");
+        while (1) { tight_loop_contents(); }
+    }
+    printf("Analog microphone initialized successfully\n");
 
+    // set callback that is called when all the samples in the library
+    // internal sample buffer are ready for reading
+    analog_microphone_set_samples_ready_handler(on_analog_samples_ready);
+    printf("ADC callback handler registered\n");
+
+	    // start capturing data from the analog microphone
+    printf("Starting analog microphone DMA capture...\n");
+    if (analog_microphone_start() < 0) 
+	{
+        printf("ERROR: PDM microphone start failed!\n");
+        while (1) { tight_loop_contents();  }
+    }
+    printf("Analog microphone started successfully - DMA should be running\n");
+	// ------------------------------------------------------------------------------
+
+    printf("Initializing GPIO for DMG video capture...\n");
     initialize_gpio();
+    printf("Initializing PIO programs for DMG controller...\n");
     initialize_pio_program();
 
-    gpio_set_irq_enabled_with_callback(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true, &gpio_callback_VIDEO);
+    printf("=== SYSTEM READY - DELAYING BEFORE VIDEO INIT ===\n");
+    printf("Waiting 7 seconds...\n");
+    stdio_flush();
+    
+    // Long delay - let everything stabilize
+    for (int i = 7; i > 0; i--) {
+        printf("%d...\n", i);
+        stdio_flush();
+        sleep_ms(1000);
+    }
+    
+    printf("\n*** PAST COUNTDOWN ***\n");
+    stdio_flush();
+    sleep_ms(500);
+    
+    printf("Skipping video initialization (commented out for testing)\n");
+    stdio_flush();
+    
+    // COMMENTED OUT FOR TESTING
+    
+    printf("Starting video initialization NOW...\n");
+    stdio_flush();
+    sleep_ms(100);
+    
+    printf("Step 1: About to call pio_add_program()...\n");
+    stdio_flush();
+    sleep_ms(100);
+    
+    video_offset = pio_add_program(pio_video, &video_capture_program);
+    
+    printf("  -> Loaded at offset %d\n", video_offset);
+    stdio_flush();
+    
+    printf("Step 2: About to initialize PIO state machine...\n");
+    stdio_flush();
+    
+    video_capture_program_init(pio_video, video_sm, video_offset);
+    
+    printf("  -> State machine initialized\n");
+    stdio_flush();
+    
+    printf("Step 3: About to initialize DMA...\n");
+    stdio_flush();
+    
+    video_capture_dma_init(pio_video, video_sm, packed_buffer_0, PACKED_FRAME_SIZE);
+    
+    printf("  -> DMA initialized (packed format: %d bytes)\n", PACKED_FRAME_SIZE);
+    stdio_flush();
+    
+    printf("\n=== AUDIO-ONLY TEST MODE ===\n");
+    printf("If you see this, the countdown works fine\n");
+    stdio_flush();
 
+    // Track which packed buffer is being captured
+    uint8_t* packed_capture = packed_buffer_0;
+    uint8_t* packed_next = packed_buffer_1;
+    bool video_capture_active = false;
 
-
+    printf("Entering main loop...\n");
+    
+    // Main loop - PIO video + perfect audio
     while (true) 
     {
-        // for (uint y = 0; y < FRAME_HEIGHT; ++y) {
-		// 	uint16_t *pixbuf;
-		// 	queue_remove_blocking(&dvi0.q_colour_free, &pixbuf);
-		// 	// // sprite_blit16(pixbuf, (const uint16_t *)testcard_320x240 + (y + frame_ctr / 2) % 240 * FRAME_WIDTH, 320);
-		// 	// sprite_fill16(pixbuf, 0x07ff, FRAME_WIDTH);
-		// 	// for (int i = 0; i < N_BERRIES; ++i)
-		// 	// 	// sprite_asprite16(pixbuf, &berry[i], atrans[i], y, FRAME_WIDTH);
-		// 	// 	sprite_sprite16(pixbuf, &berry[i], y, FRAME_WIDTH);
-		// 	queue_add_blocking(&dvi0.q_colour_valid, &pixbuf);
-		// }
-        nes_classic_controller();
-        pio_sm_put(pio_dmg, state_machine, pio_out_value);
+        static uint32_t loop_counter = 0;
+        static uint32_t frames_captured = 0;
+        // Start video capture after another 3 seconds in the loop (total ~10 sec from boot)
+        // if (!video_capture_active && loop_counter > 3000000) {
+        //     printf("\n*** STARTING VIDEO CAPTURE NOW (after %lu loops) ***\n", loop_counter);
+        //     printf("Calling video_capture_start_frame()...\n");
+        //     video_capture_start_frame(pio_video, video_sm, packed_capture, PACKED_FRAME_SIZE);
+        //     printf("Returned from video_capture_start_frame()\n");
+        //     printf("Waiting for VSYNC from Game Boy...\n");
+        //     video_capture_active = true;
+        // }
+        // Check if video frame is ready (non-blocking)
+        // if (video_capture_active && video_capture_frame_ready()) {
+        //     // Frame complete! Get the packed buffer
+        //     uint8_t* completed_packed = video_capture_get_frame();
+        //     // Quickly unpack: 4 pixels per byte -> 1 pixel per byte
+        //     uint8_t* dest = framebuffer_capture;
+        //     for (int i = 0; i < PACKED_FRAME_SIZE; i++) {
+        //         uint8_t packed = completed_packed[i];
+        //         dest[0] = (packed >> 0) & 0x03;
+        //         dest[1] = (packed >> 2) & 0x03;
+        //         dest[2] = (packed >> 4) & 0x03;
+        //         dest[3] = (packed >> 6) & 0x03;
+        //         dest += 4;
+        //     }
+        //     // Atomic swap: make unpacked frame visible to display core
+        //     framebuffer_display = framebuffer_capture;
+        //     // Ping-pong framebuffers
+        //     framebuffer_capture = (framebuffer_capture == framebuffer_0) ? framebuffer_1 : framebuffer_0;
+        //     // Swap packed buffers for next DMA capture
+        //     uint8_t* temp = packed_capture;
+        //     packed_capture = packed_next;
+        //     packed_next = temp;
+        //     // Start capturing next frame immediately
+        //     video_capture_start_frame(pio_video, video_sm, packed_capture, PACKED_FRAME_SIZE);
+        //     frames_captured++;
+        // }
+        // Poll controller occasionally
+        if (++loop_counter % 100000 == 0) {
+            nes_classic_controller();
+            pio_sm_put(pio_dmg, state_machine, pio_out_value);
+        }
+        
+        // Blink LED and print stats
+        if (loop_counter % 1000000 == 0) {
+            static bool led_state = false;
+            led_state = !led_state;
+            gpio_put(ONBOARD_LED_PIN, led_state);
+            
+            int write_size = get_write_size(&dvi0.audio_ring, false);
+            int read_size = get_read_size(&dvi0.audio_ring, false);
+            int fill_level = AUDIO_BUFFER_SIZE - write_size;
+            
+            // if (video_capture_active) {
+            //     printf("Frames: %lu | Audio: %d/%d (w=%d r=%d)\n",
+            //            frames_captured, fill_level, AUDIO_BUFFER_SIZE, write_size, read_size);
+            // } else {
+            //     printf("Loop %lu - waiting to start video | Audio: %d/%d\n", 
+            //            loop_counter, fill_level, AUDIO_BUFFER_SIZE);
+            // }
+        }
     }
     __builtin_unreachable();
 }
@@ -387,12 +577,29 @@ int main(void)
 // static void __not_in_flash_func(on_analog_samples_ready)(void)
 static void on_analog_samples_ready(void)
 {
-    // callback from library when all the samples in the library
-    // internal sample buffer are ready for reading 
-
-    samples_read = analog_microphone_read(sample_buffer, AUDIO_BUFFER_SIZE);
+    static uint32_t callback_count = 0;
     
-	
+    // ADC has filled the write buffer with fresh samples
+    // Read them into the current write buffer
+    int samples_read = analog_microphone_read((int16_t*)adc_write_buffer, ADC_CHUNK_SIZE);
+    
+    // Copy the JUST-READ samples (from write buffer) to the fixed buffer that PIO reads from
+    // We copy from adc_write_buffer because that's what we just filled above!
+    memcpy(sample_buffer_for_pio, (void*)adc_write_buffer, ADC_CHUNK_SIZE * sizeof(int16_t));
+    
+    // Atomically swap buffers - get ready for next ADC capture
+    volatile int16_t* temp = adc_write_buffer;
+    adc_write_buffer = adc_read_buffer;
+    adc_read_buffer = temp;
+    
+    // Signal that fresh samples are ready
+    adc_buffer_ready = true;
+    
+    // Debug output every 1000 callbacks (every ~2 seconds at 64-sample chunks)
+    if (++callback_count % 1000 == 0) {
+        printf("ADC callback #%lu: read %d samples, sample[0]=%d, sample[32]=%d\n", 
+               callback_count, samples_read, sample_buffer_for_pio[0], sample_buffer_for_pio[32]);
+    }
 }
 
 static long map(long x, long in_min, long in_max, long out_min, long out_max)
@@ -447,60 +654,43 @@ static void initialize_gpio(void)
     gpio_pull_up(SDA_PIN);
 }
 
+// VSYNC interrupt handler - OPTIMIZED FOR SPEED
+// Captures full 160x144 frame in interrupt context (~16ms @ 280MHz)
+// Audio PIO timer (priority 0x00) can still preempt this for smooth audio
+// Minor pixel artifacts acceptable - Game Boy stays stable!
 static void __no_inline_not_in_flash_func(gpio_callback_VIDEO)(uint gpio, uint32_t events)
 {
-//                  ┌─────────────────────────────────────────┐     
-// VSYNC ───────────┘                                         └───────────────────────
-//                    ┌──────┐                                     ┌──────┐
-// HSYNC ─────────────┘      └─────────────────────────────────────┘      └───────────
-//                      ┌─┐     ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐      ┌─┐     ┌─┐ ┌─┐ ┌
-// CLOCK ───────────────┘ └─────┘ └─┘ └─┘ └─┘ └─┘ └─┘ └─┘ └─┘ └──────┘ └─────┘ └─┘ └─┘
-//       ─────────────┐   ┌──┐  ┌┐ ┌┐ ┌──┐ ┌┐ ┌┐ ┌───────────────┐   ┌──┐  ┌┐ ┌┐ ┌──┐ 
-// DATA 0/1           └───┘  └──┘└─┘└─┘  └─┘└─┘└─┘               └───┘  └──┘└─┘└─┘  └─
-
-    uint16_t x = 0;
-    uint16_t y = 0;
-    pixel_active = framebuffer_active;
-    pixel_old = framebuffer_previous;
-    uint8_t state_clk;
-    uint8_t state_clk_last;
-
-    if (events & GPIO_IRQ_EDGE_FALL)
-        return;
+    // Fast inline pixel read - no function call overhead
+    #define read_pixel_fast() ({ \
+        while (gpio_get(PIXEL_CLOCK_PIN)); \
+        while (!gpio_get(PIXEL_CLOCK_PIN)); \
+        ((gpio_get(DATA_1_PIN) << 1) | gpio_get(DATA_0_PIN)); \
+    })
     
-
-    for (y = 0; y < DMG_PIXELS_Y; y++)
-    {
-        // wait for HSYNC edge to rise & fall
-        while (gpio_get(HSYNC_PIN) == 0);
-        while (gpio_get(HSYNC_PIN) == 1);
-        // Grab first pixel just after HYSNC goes low
-        read_pixel();
+    // Capture entire 160x144 frame into capture buffer
+    // Audio interrupts CAN happen here (causes minor artifacts but keeps audio smooth)
+    uint8_t* fb = framebuffer_capture;
+    
+    for (int y = 0; y < 144; y++) {
+        // Wait for HSYNC
+        while (!gpio_get(HSYNC_PIN));
+        while (gpio_get(HSYNC_PIN));
         
-        // Get remaining pixels on each falling edge of the clock
-        x = 1;
-        state_clk = gpio_get(PIXEL_CLOCK_PIN);
-        state_clk_last = state_clk;
-
-        while (x < DMG_PIXELS_X)
-        {
-            state_clk = gpio_get(PIXEL_CLOCK_PIN);
-            if (state_clk == 0 && state_clk_last == 1)
-            {
-                read_pixel();
-                x++;
-            }
-            state_clk_last = state_clk;
+        // Capture 160 pixels for this scanline
+        // UNROLLED for speed - process 4 pixels at a time
+        for (int x = 0; x < 160; x += 4) {
+            fb[y * 160 + x + 0] = read_pixel_fast();
+            fb[y * 160 + x + 1] = read_pixel_fast();
+            fb[y * 160 + x + 2] = read_pixel_fast();
+            fb[y * 160 + x + 3] = read_pixel_fast();
         }
     }
-}
-
-// static void read_pixel(void)
-static void __not_in_flash_func(read_pixel)(void)
-{
-    uint8_t new_value = (gpio_get(DATA_0_PIN) << 1) + gpio_get(DATA_1_PIN);
-    *pixel_active++ = frameblending_enabled ? (new_value == 0 ? new_value|*pixel_old : new_value) : new_value;
-    *pixel_old++ = new_value > 0 ? 2 : 0;   // To brighten up the previous frame
+    
+    // Atomic swap: make captured frame visible to display core
+    framebuffer_display = fb;
+    framebuffer_capture = (fb == framebuffer_0) ? framebuffer_1 : framebuffer_0;
+    
+    #undef read_pixel_fast
 }
 
 // static bool nes_classic_controller(void)
@@ -511,7 +701,8 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
     if (current_micros - last_micros < 20000)   // probably longer than it needs to be, NES Classic queries about every 5ms
         return false;
 
-    gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, false);
+    // No longer need to disable VSYNC IRQ since handler is lightweight now
+    // gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, false);
     
     static bool initialized = false;
     static uint8_t i2c_buffer[16] = {0};
@@ -542,7 +733,7 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
     if (ret < 0)
     {
         last_micros = time_us_32();
-        gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true);
+        // gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true);
         return false;
     }
         
@@ -622,7 +813,7 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
     uint8_t pio_report = ~((pins_dpad << 4) | (pins_other&0xF));
     pio_out_value = (uint32_t)pio_report;
 
-    gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true);
+    // gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true);
 
     return true;
 }

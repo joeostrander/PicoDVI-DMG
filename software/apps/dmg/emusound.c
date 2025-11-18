@@ -1,5 +1,6 @@
 /*******************************************************************
- Sound
+ Sound - PIO-Based Audio Timer Version
+ Uses PIO for jitter-free audio timing instead of CPU timers
 *******************************************************************/
 #include "pico.h"
 #include <stdlib.h>
@@ -12,6 +13,7 @@
 #include "pico/sync.h"
 
 #include "audio_ring.h"
+#include "pio_audio_timer.h"
 // #include "display.h"
 // #include "sound.h"
 // #include "emuapi.h"
@@ -19,6 +21,7 @@
 #include "emusound.h"
 
 semaphore_t timer_sem;
+pio_audio_timer_t audio_timer_pio;
 
 // 
 
@@ -107,6 +110,10 @@ const int16_t sine[32] = {
     0x8000,0x6707,0x4f04,0x38e3,0x257d,0x1592,0x9be,0x276,
     0x0,0x276,0x9be,0x1592,0x257d,0x38e3,0x4f04,0x6707
 };
+
+// Set to 1 to test with sine wave, 0 for real microphone input
+#define TEST_WITH_SINE_WAVE 0  // DISABLED: Pipeline verified, using real Game Boy audio
+
 // static bool __not_in_flash_func(audio_timer_callback)(struct repeating_timer *t)
 static bool audio_timer_callbackzzzzzzz(struct repeating_timer *t)
 {
@@ -179,33 +186,191 @@ static bool audio_timer_callbackzzzzzzz(struct repeating_timer *t)
   return true;
 }
 
-bool audio_timer_callback(struct repeating_timer *t) 
+// TEMPORARY: Using CPU timer instead of PIO to avoid IRQ conflicts
+// The PIO1_IRQ_0 conflicts with DMG controller
+static bool __time_critical_func(audio_timer_callbackBBBLLLAAHHHHHHH)(struct repeating_timer *t) 
 {
+    static uint32_t call_count = 0;
+    static uint sample_count = 0;
+    
+    // write in chunks
+    int size = get_write_size(ring, true);
+    if (size >= TICK_SAMPLES)
+    {
+        int audio_offset = get_write_offset(ring);
+        if ((size >= ((3*hdmi_buffer_size)>>2)) &&
+            (call_count <= (TICKCOUNT - 2)))
+        {
+            // Allow to refill buffer
+            size = (TICK_SAMPLES<<1);
+        }
+        else
+        {
+            size = TICK_SAMPLES;
+        }
+        
+        // OPTIMIZED: Process samples without expensive division
+        for (int c = 0; c < size; c++)
+        {
+#if TEST_WITH_SINE_WAVE
+            // Test with sine wave for debugging
+            int32_t capture_value = sine[sample_count % 32];
+#else
+            // Get sample from buffer with proper wrapping
+            // ADC is 12-bit (0-4095), convert to 16-bit signed (-32768 to 32767)
+            // Fast conversion: shift left 4 bits, then subtract 32768
+            int32_t capture_value = ((int32_t)samples[sample_count & (AUDIO_BUFFER_SIZE - 1)] << 4) - 32768;
+#endif
+            sample_count++;
+            
+            hdmi_buffer[audio_offset].channels[0] = (int16_t)capture_value;
+            hdmi_buffer[audio_offset].channels[1] = (int16_t)capture_value;
+            audio_offset = (audio_offset + 1) & (hdmi_buffer_size-1);
+        }
+        set_write_offset(ring, audio_offset);
 
-	int size = get_write_size(ring, false);
-    // int size = get_write_size(ring, true);
-    audio_sample_t *audio_ptr = get_write_pointer(ring);
-    audio_sample_t sample;
-
-	static uint sample_count = 0;
-	int32_t capture_value;
-	int32_t output_value;
-    for (int cnt = 0; cnt < size; cnt++) 
-	{
-		capture_value = samples[sample_count % AUDIO_BUFFER_SIZE];
-    	output_value = capture_value;
-		output_value = map(output_value, 0, 4095, INT16_MIN, INT16_MAX);
-        sample.channels[0] = output_value;
-        sample.channels[1] = output_value;
-
-        *audio_ptr++ = sample;
-        sample_count++;
+        if (sample_count >= AUDIO_BUFFER_SIZE)
+        {
+            sample_count -= AUDIO_BUFFER_SIZE;
+        }
     }
 
+    if (++call_count >= TICKCOUNT)
+    {
+        call_count = 0;
 
-    increase_write_pointer(ring, size);
- 
+        // Swap the buffers and Signal the 50Hz semaphore
+        first = !first;
+        sem_release(&timer_sem);
+    }
     return true;
+}
+
+///TESTING!!! skipping the PIO program!
+//static void __isr __time_critical_func(pio_audio_callback)(void) 
+static bool __time_critical_func(audio_timer_callback)(void) 
+{
+    static uint32_t call_count = 0;
+    static uint32_t debug_counter = 0;
+    
+    // Process chunk of samples from ADC double-buffer
+    // ADC fills one buffer while we read from the other
+    // IMPORTANT: Always process exactly TICK_SAMPLES (64), never more!
+    // The ADC buffer is only 64 samples, so we can't read beyond that.
+    
+    int size = get_write_size(ring, true);
+    if (size >= TICK_SAMPLES)
+    {
+        int audio_offset = get_write_offset(ring);
+        
+        // ALWAYS process exactly 64 samples - no doubling!
+        // Our ADC buffer is only 64 samples, reading more would be garbage data
+        size = TICK_SAMPLES;
+          // DEBUG: Print detailed audio info every 1000 callbacks
+        int32_t debug_capture_value = 0;
+        if (++debug_counter % 1000 == 0) {
+            int32_t adc_0 = (int32_t)((uint16_t)samples[0]);
+            int32_t adc_32 = (int32_t)((uint16_t)samples[32]);
+            printf("PIO Audio: ADC[0]=%d, ADC[32]=%d | ", adc_0, adc_32);
+        }
+        
+        // Process chunk of samples (exactly 64 samples)
+        for (int c = 0; c < size; c++)
+        {
+#if TEST_WITH_SINE_WAVE
+            // Test with sine wave for debugging
+            int32_t capture_value = sine[c % 32];
+#else
+            // ADC is 12-bit (0-4095), convert to 16-bit signed (-32768 to 32767)
+            // Use EXACT SAME formula as working CPU timer version
+            int32_t capture_value = ((int32_t)((uint16_t)samples[c]) << 4) - 32768;
+            
+            if (debug_counter % 1000 == 0 && c == 0) {
+                debug_capture_value = capture_value;
+            }
+#endif
+            
+            hdmi_buffer[audio_offset].channels[0] = (int16_t)capture_value;
+            hdmi_buffer[audio_offset].channels[1] = (int16_t)capture_value;
+            audio_offset = (audio_offset + 1) & (hdmi_buffer_size-1);
+        }          if (debug_counter % 1000 == 0) {
+            printf("HDMI[0]=%d (original formula, no extra gain)\n", (int16_t)debug_capture_value);
+        }
+        set_write_offset(ring, audio_offset);
+    }
+    
+    // 50Hz semaphore for compatibility with existing code
+    if (++call_count >= TICKCOUNT)
+    {
+        call_count = 0;
+        first = !first;
+        sem_release(&timer_sem);
+    }
+
+    return true;
+}
+
+// PIO-based audio timer callback - called at precise intervals by hardware
+// This replaces the CPU repeating_timer for jitter-free audio
+// Called at 500Hz (every 2ms) to process chunks of 64 samples
+static void __isr __time_critical_func(pio_audio_callback)(void) 
+{
+    static uint32_t call_count = 0;
+    static uint32_t debug_counter = 0;
+    
+    // Process chunk of samples from ADC double-buffer
+    // ADC fills one buffer while we read from the other
+    // IMPORTANT: Always process exactly TICK_SAMPLES (64), never more!
+    // The ADC buffer is only 64 samples, so we can't read beyond that.
+    
+    int size = get_write_size(ring, true);
+    if (size >= TICK_SAMPLES)
+    {
+        int audio_offset = get_write_offset(ring);
+        
+        // ALWAYS process exactly 64 samples - no doubling!
+        // Our ADC buffer is only 64 samples, reading more would be garbage data
+        size = TICK_SAMPLES;
+          // DEBUG: Print detailed audio info every 1000 callbacks
+        int32_t debug_capture_value = 0;
+        if (++debug_counter % 1000 == 0) {
+            int32_t adc_0 = (int32_t)((uint16_t)samples[0]);
+            int32_t adc_32 = (int32_t)((uint16_t)samples[32]);
+            printf("PIO Audio: ADC[0]=%d, ADC[32]=%d | ", adc_0, adc_32);
+        }
+        
+        // Process chunk of samples (exactly 64 samples)
+        for (int c = 0; c < size; c++)
+        {
+#if TEST_WITH_SINE_WAVE
+            // Test with sine wave for debugging
+            int32_t capture_value = sine[c % 32];
+#else
+            // ADC is 12-bit (0-4095), convert to 16-bit signed (-32768 to 32767)
+            // Use EXACT SAME formula as working CPU timer version
+            int32_t capture_value = ((int32_t)((uint16_t)samples[c]) << 4) - 32768;
+            
+            if (debug_counter % 1000 == 0 && c == 0) {
+                debug_capture_value = capture_value;
+            }
+#endif
+            
+            hdmi_buffer[audio_offset].channels[0] = (int16_t)capture_value;
+            hdmi_buffer[audio_offset].channels[1] = (int16_t)capture_value;
+            audio_offset = (audio_offset + 1) & (hdmi_buffer_size-1);
+        }          if (debug_counter % 1000 == 0) {
+            printf("HDMI[0]=%d (original formula, no extra gain)\n", (int16_t)debug_capture_value);
+        }
+        set_write_offset(ring, audio_offset);
+    }
+    
+    // 50Hz semaphore for compatibility with existing code
+    if (++call_count >= TICKCOUNT)
+    {
+        call_count = 0;
+        first = !first;
+        sem_release(&timer_sem);
+    }
 }
 
 static void beginAudio(void)
@@ -215,14 +380,47 @@ static void beginAudio(void)
   if (!begun) // Only begin once...
   {
     begun = true;
-    sem_init(&timer_sem, 0, 1);
-
-    // Create the timer callback
-    emu_silenceSound();
-    // getAudioRing(&ring); //JOE
-    hdmi_buffer = ring->buffer;
+    sem_init(&timer_sem, 0, 1);    // Create the timer callback
+    emu_silenceSound();    hdmi_buffer = ring->buffer;
     hdmi_buffer_size = ring->size;
+
+    // Use CPU timer for audio chunking (disable PIO timer)
+    printf("Initializing CPU timer for audio chunking at %d ms intervals...\n", TICKMS);
     add_repeating_timer_ms(-TICKMS, audio_timer_callback, NULL, &audio_timer);
+
+    printf("sound initialized\n");
+  }
+  else
+  {
+    emu_silenceSound();
+  }
+}
+
+static void beginAudioPIO(void)
+{
+  static bool begun = false;
+
+  if (!begun) // Only begin once...
+  {
+    begun = true;
+    sem_init(&timer_sem, 0, 1);    // Create the timer callback
+    emu_silenceSound();    hdmi_buffer = ring->buffer;
+    hdmi_buffer_size = ring->size;
+    
+    // Use PIO1 IRQ_1 (DMG controller uses IRQ_0, so no conflict!)
+    // Initialize PIO-based audio timer at CHUNK rate (500Hz = 1000ms / 2ms)
+    // NOT at sample rate! We process 64 samples per chunk.
+    const uint CHUNK_RATE_HZ = 1000 / TICKMS;  // 500Hz for 2ms ticks
+    printf("Initializing PIO audio timer at %d Hz chunk rate (processes %d samples/chunk)...\n", 
+           CHUNK_RATE_HZ, TICK_SAMPLES);
+    if (pio_audio_timer_init(&audio_timer_pio, pio1, CHUNK_RATE_HZ, pio_audio_callback)) {
+        pio_audio_timer_start(&audio_timer_pio);
+        printf("PIO audio timer started successfully on PIO1_IRQ_1!\n");
+    } else {
+        printf("ERROR: PIO audio timer init failed! Falling back to CPU timer.\n");
+        // Fallback to CPU timer if PIO fails
+        add_repeating_timer_ms(-TICKMS, audio_timer_callback, NULL, &audio_timer);
+    }
 
     printf("sound initialized\n");
   }

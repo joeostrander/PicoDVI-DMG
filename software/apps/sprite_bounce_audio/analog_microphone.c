@@ -29,8 +29,7 @@ static struct {
     analog_samples_ready_handler_t samples_ready_handler;
 } analog_mic;
 
-// static void analog_dma_handler();
-static void __no_inline_not_in_flash_func(analog_dma_handler)(void);
+static void analog_dma_handler();
 
 int analog_microphone_init(const struct analog_microphone_config* config) {
     memset(&analog_mic, 0x00, sizeof(analog_mic));
@@ -61,14 +60,14 @@ int analog_microphone_init(const struct analog_microphone_config* config) {
         return -1;
     }
 
-    float clk_div = (clock_get_hz(clk_adc) / (1.0 * config->sample_rate)) - 1;    dma_channel_config dma_channel_cfg = dma_channel_get_default_config(analog_mic.dma_channel);
+    float clk_div = (clock_get_hz(clk_adc) / (1.0 * config->sample_rate)) - 1;
+
+    dma_channel_config dma_channel_cfg = dma_channel_get_default_config(analog_mic.dma_channel);
 
     channel_config_set_transfer_data_size(&dma_channel_cfg, DMA_SIZE_16);
     channel_config_set_read_increment(&dma_channel_cfg, false);
     channel_config_set_write_increment(&dma_channel_cfg, true);
     channel_config_set_dreq(&dma_channel_cfg, DREQ_ADC);
-    // Set high priority for audio DMA to ensure samples don't get dropped
-    channel_config_set_high_priority(&dma_channel_cfg, true);
 
     analog_mic.dma_irq = DMA_IRQ_1;
 
@@ -154,15 +153,16 @@ void analog_microphone_stop() {
     irq_set_enabled(analog_mic.dma_irq, false);
 }
 
-// static void analog_dma_handler() 
-static void __no_inline_not_in_flash_func(analog_dma_handler)(void)
-{
+static void analog_dma_handler() {
     // clear IRQ
     if (analog_mic.dma_irq == DMA_IRQ_0) {
         dma_hw->ints0 = (1u << analog_mic.dma_channel);
     } else if (analog_mic.dma_irq == DMA_IRQ_1) {
         dma_hw->ints1 = (1u << analog_mic.dma_channel);
     }
+
+    // get the current buffer index
+    analog_mic.raw_buffer_read_index = analog_mic.raw_buffer_write_index;
 
     // get the next capture index to send the dma to start
     analog_mic.raw_buffer_write_index = (analog_mic.raw_buffer_write_index + 1) % ANALOG_RAW_BUFFER_COUNT;
@@ -188,21 +188,18 @@ int analog_microphone_read(int16_t* buffer, size_t samples) {
         samples = analog_mic.config.sample_buffer_size;
     }
 
-    // Use local copy to avoid race with ISR
-    int current_read_index = analog_mic.raw_buffer_read_index;
-    int current_write_index = analog_mic.raw_buffer_write_index;
-    
-    if (current_write_index == current_read_index) {
+    if (analog_mic.raw_buffer_write_index == analog_mic.raw_buffer_read_index) {
         return 0;
     }
 
-    uint16_t* in = analog_mic.raw_buffer[current_read_index];
+    uint16_t* in = analog_mic.raw_buffer[analog_mic.raw_buffer_read_index];
     int16_t* out = buffer;
+    // int16_t bias = analog_mic.bias;
 
-    // Wrap the read index properly
-    analog_mic.raw_buffer_read_index = (current_read_index + 1) % ANALOG_RAW_BUFFER_COUNT;
+    analog_mic.raw_buffer_read_index++;
 
     // for (int i = 0; i < samples; i++) {
+    //     // *out++ = *in++ - bias;
     //     *out++ = *in++;
     // }
     memcpy(out, in, samples * sizeof(uint16_t));
