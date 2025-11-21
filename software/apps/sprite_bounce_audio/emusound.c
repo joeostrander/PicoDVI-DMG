@@ -55,45 +55,10 @@ int64_t int_count = 0;
 
 static long map(long x, long in_min, long in_max, long out_min, long out_max);
 
-uint16_t emu_SoundSampleRate(void)
-{
-  return SAMPLE_FREQ;
-}
 
-void emu_sndInit(bool playSound, bool reset, audio_ring_t* audio_ring, int16_t* sample_buff)  // JOE ADDED audio_ring
-{
-  genSound = playSound;
 
-  ring = audio_ring;
-  samples = sample_buff;
 
-//   // This can be called multiple times...
-//   if (!soundCreated)
-//   {
-//     soundCreated = sound_create(SAMPLE_FREQ, NUMSAMPLES);
-//   }
 
-//   // Call each time, as sound type may have changed
-//   if (soundCreated)
-//   {
-//     sound_init(emu_ACBRequested(), reset);
-//   }
-
-  // Begin sound regardless, as needed for 50 Hz
-  beginAudio();
-}
-
-// Calls to this function are synchronised to 50Hz through main timer interrupt
-void emu_generateSoundSamples(void)
-{
-//   if (genSound && soundCreated)
-//   {
-//     sound_frame(first ? soundBuffer2 : soundBuffer16);
-// #ifdef TIME_SPARE
-//     sound_count++;
-// #endif
-//   }
-}
 const int16_t sine[32] = {
     0x8000,0x98f8,0xb0fb,0xc71c,0xda82,0xea6d,0xf641,0xfd89,
     0xffff,0xfd89,0xf641,0xea6d,0xda82,0xc71c,0xb0fb,0x98f8,
@@ -200,6 +165,40 @@ static long map(long x, long in_min, long in_max, long out_min, long out_max)
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
+void emu_sndInit(bool playSound, bool reset, audio_ring_t* audio_ring, int16_t* sample_buff)  // JOE ADDED audio_ring
+{
+  genSound = playSound;
+
+  ring = audio_ring;
+  samples = sample_buff;
+
+//   // This can be called multiple times...
+//   if (!soundCreated)
+//   {
+//     soundCreated = sound_create(SAMPLE_FREQ, NUMSAMPLES);
+//   }
+
+//   // Call each time, as sound type may have changed
+//   if (soundCreated)
+//   {
+//     sound_init(emu_ACBRequested(), reset);
+//   }
+
+  // Begin sound regardless, as needed for 50 Hz
+  beginAudio();
+}
+
+// Calls to this function are synchronised to 50Hz through main timer interrupt
+void emu_generateSoundSamples(void)
+{
+//   if (genSound && soundCreated)
+//   {
+//     sound_frame(first ? soundBuffer2 : soundBuffer16);
+// #ifdef TIME_SPARE
+//     sound_count++;
+// #endif
+//   }
+}
 
 void emu_silenceSound(void)
 {
@@ -211,4 +210,9 @@ void emu_silenceSound(void)
       soundBuffer16[i] = ZEROSOUND;
     }
 //   }
+}
+
+uint16_t emu_SoundSampleRate(void)
+{
+  return SAMPLE_FREQ;
 }

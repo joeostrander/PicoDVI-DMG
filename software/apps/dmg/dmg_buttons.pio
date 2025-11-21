@@ -1,7 +1,7 @@
 ; Joe Ostrander
 ; 2023
 
-.program dmg
+.program dmg_buttons
 
 set pins, 0b1111
 forever:
@@ -32,11 +32,11 @@ other:
 #define OUT_PIN_COUNT   4   // P10,P12,P13,P11
 
 // Helper function (for use in C program) to initialize this PIO program
-void dmg_program_init(PIO pio, uint sm, uint offset, uint in_pin_start, uint out_pin_start, float div) 
+void dmg_buttons_program_init(PIO pio, uint sm, uint offset, uint in_pin_start, uint out_pin_start, float div) 
 {
     // Sets up state machine and wrap target. This function is automatically
-    // generated in dmg.pio.h.
-    pio_sm_config config = dmg_program_get_default_config(offset);
+    // generated in dmg_buttons.pio.h.
+    pio_sm_config config = dmg_buttons_program_get_default_config(offset);
 
     // Allow PIO to control GPIO pin (as output)
     for (int i = 0; i < OUT_PIN_COUNT; i++)

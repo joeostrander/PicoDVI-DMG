@@ -1,6 +1,19 @@
-// TODO:
-// get audio working again
-// get controls working again
+/*
+
+TODO:
+    get audio working again
+    - maybe go back to PIO IRQ timing instead of timer
+    - try changing initialization order?
+    get controls working again
+    - verify PIO program re-added correctly
+    - will it even work on PIO0 (are there enough instructions available?)
+
+    Get HDMI (DVI) working on real TV?
+    Possibly pull in some of the OSD features from PicoDVI-N64
+    cleanup unused headers
+    Add my version of OSD back in
+
+*/
 
 // Joe Ostrander
 // 2023.11.19
@@ -10,14 +23,6 @@
 // https://github.com/joeostrander/consolized-game-boy
 
 // Thanks to PicoDVI and PicoDVI-N64 for getting me started :)
-
-//TODO:
-// Audio over HDMI?
-// Get HDMI (DVI) working on real TV?
-// Possibly pull in some of the OSD features from PicoDVI-N64
-// cleanup unused headers
-// Add my version of OSD back in
-// 
 
 // REMINDER: Always use cmake with:  -DPICO_COPY_TO_RAM=1
 
@@ -39,7 +44,7 @@
 #include "dvi.h"
 #include "dvi_serialiser.h"
 #include "common_dvi_pin_configs.h"
-#include "dmg.pio.h"
+#include "dmg_buttons.pio.h"
 // #include "dmg_simple.pio.h"
 #include "tmds_encode.h"
 #include "audio_ring.h"  // For get_write_size and get_read_size
@@ -53,13 +58,18 @@
 #include "video_capture.pio.h"  // PIO-based video capture - COMMENTED OUT FOR TESTING
 
 #define ENABLE_AUDIO 0  // Set to 1 to enable audio, 0 to disable all audio code
-#define ENABLE_PIO_DMG 0  // Set to 1 to enable DMG PIO controller, 0 to disable
+#define ENABLE_PIO_DMG_BUTTONS 0  // Set to 1 to enable DMG PIO controller, 0 to disable
+#define ENABLE_CPU_DMG_BUTTONS 0  // Set to 1 to enable DMG CPU sending of buttons, 0 to disable
 #define ENABLE_VIDEO_CAPTURE 1
+#define ENABLE_OSD 0  // Set to 1 to enable OSD code, 0 to disable (TODO)
 
+
+#if ENABLE_AUDIO
 static const int hdmi_n[6] = {4096, 6272, 6144, 3136, 4096, 6144};  // 32k, 44.1k, 48k, 22.05k, 16k, 24k
 static uint16_t  rate = SAMPLE_FREQ;
 // #define AUDIO_BUFFER_SIZE   (0x1<<8) // Must be power of 2
 audio_sample_t      audio_buffer[AUDIO_BUFFER_SIZE];
+#endif
 
 #define DEBUG_BUTTON_PRESS   // Illuminate LED on button presses
 
@@ -141,22 +151,25 @@ typedef enum
     BUTTON_STATE_UNPRESSED
 } button_state_t;
 
-#if ENABLE_PIO_DMG
-static PIO pio_dmg = pio1;
-// static PIO pio_dmg_simple = pio1;
-static uint state_machine = 0;
-static uint pio_out_value = 0;
+#if ENABLE_PIO_DMG_BUTTONS
+static PIO pio_dmg_buttons = pio0;
+static uint dmg_buttons_sm = 3;  // Use SM3 (SM0, SM1, SM2 used by DVI TMDS channels)
+static uint pio_buttons_out_value = 0;
 #endif
 
-// PIO video capture  
-// CANNOT use PIO0 - it's used by DVI (SM0, SM1, SM2)
-// CANNOT use PIO1 SM0 - it's used by DMG controller
-// CANNOT use PIO1 SM1 - it's used by audio timer
-// CAN use PIO1 SM2 or SM3 for video capture!
-static PIO pio_video = pio1;  // Share PIO1 with DMG controller and audio
-static uint video_sm = 3;      // Use SM3 (DMG uses SM0, audio uses SM1)
-// static uint video_sm = 2;      // Use SM3 (DMG uses SM0)
-// static uint video_sm = 1;
+// PIO video capture
+// PIO NOTES:
+// - Each PIO instance has a 32 instruction limit
+// - Pico allows for 4 state machines per PIO instance
+// - the 32 instructions are shared among all state machines in that PIO instance
+// PIO1:
+// - Video capture PIO uses 31 instructions, so we can't have any more PIO programs on PIO1
+// PIO0:
+// - DVI uses SM0, SM1, SM2, but all 3 use the same program (instruction count = 2)
+// - I think we can use SM3 for DMG buttons PIO
+
+static PIO pio_video = pio1;  // Exclusively for video capture
+static uint video_sm = 0;
 static uint video_offset = 0;
 
 static uint8_t button_states[BUTTON_COUNT];
@@ -232,6 +245,7 @@ uint8_t* game_palette = colors__gbp_nso;
 uint8_t background_color = RGB888_TO_RGB332(0x00, 0x00, 0xFF);
 
 
+#if ENABLE_AUDIO
 // configuration
 const struct analog_microphone_config mic_config = {
     // GPIO to use for input, must be ADC compatible (GPIO 26 - 28)
@@ -243,8 +257,7 @@ const struct analog_microphone_config mic_config = {
     // sample rate in Hz - match HDMI audio
     .sample_rate = SAMPLE_FREQ,
 
-    // CRITICAL: Small buffer synchronized with PIO chunk size!
-    // ADC fills 64 samples every 2ms, PIO reads 64 samples every 2ms
+    // ADC fills 64 samples every 2ms, timer reads 64 samples every 2ms
     // This eliminates the race condition
     .sample_buffer_size = ADC_CHUNK_SIZE,
 };
@@ -252,26 +265,27 @@ const struct analog_microphone_config mic_config = {
 int16_t sample_buffer_a[ADC_CHUNK_SIZE];
 int16_t sample_buffer_b[ADC_CHUNK_SIZE];
 volatile int16_t* adc_write_buffer = sample_buffer_a;  // ADC writes here
-volatile int16_t* adc_read_buffer = sample_buffer_b;   // PIO reads from here
+volatile int16_t* adc_read_buffer = sample_buffer_b;   // timer reads from here
 
-// Fixed buffer that PIO always reads from (ADC copies to this)
-int16_t sample_buffer_for_pio[ADC_CHUNK_SIZE];
-volatile bool adc_buffer_ready = false;                // Signal from ADC to PIO
+// Fixed buffer that audio always reads from (ADC copies to this)
+int16_t sample_buffer_for_audio[ADC_CHUNK_SIZE];
 volatile int samples_read = 0;
 static void on_analog_samples_ready(void);
 // static void __not_in_flash_func(on_analog_samples_ready)(void);
-static long map(long x, long in_min, long in_max, long out_min, long out_max);
+#endif // ENABLE_AUDIO
 
 static void initialize_gpio(void);
-#if ENABLE_PIO_DMG
-static void initialize_pio_program(void);
+#if ENABLE_PIO_DMG_BUTTONS
+static void initialize_dmg_buttons_pio_program(void);
 #endif
+#if ENABLE_CPU_DMG_BUTTONS
 static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t events);
-static void __no_inline_not_in_flash_func(gpio_callback_VIDEO)(uint gpio, uint32_t events);
+#endif
 
 static bool __no_inline_not_in_flash_func(nes_classic_controller)(void);
 
-static void __no_inline_not_in_flash_func(core1_scanline_callback)(void);
+// static void __no_inline_not_in_flash_func(core1_scanline_callback)(void);
+static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline);
 
 void core1_main(void)
 {
@@ -307,10 +321,11 @@ void core1_main(void)
 }
 
 // void core1_scanline_callback(void)
-static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
+// static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
+static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
 {
     // Note first two scanlines are pushed before DVI start
-    static uint scanline = 2;
+    static uint myscanline = 2;
     uint idx = 0;
     uint border_horz = 40;
     uint border_vert = 3;
@@ -318,7 +333,7 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
     static uint dmg_line_idx = 0;
     // TODO: calc array start from scanline...
     // scanlines are 0 to 149 cuz frame height 150
-    if (scanline < border_vert || scanline >= FRAME_HEIGHT-border_vert)
+    if (myscanline < border_vert || myscanline >= FRAME_HEIGHT-border_vert)
     {
         for (uint i = 0; i < sizeof(line_buffer); i++)
         {
@@ -328,7 +343,7 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
     }
     else
     {
-        dmg_line_idx = scanline - border_vert;
+        dmg_line_idx = myscanline - border_vert;
         for (uint i = 0; i < border_horz; i++)
             line_buffer[idx++] = background_color;
 
@@ -349,10 +364,10 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
     
     while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
     ;
-    // scanline = (scanline + 1) % FRAME_HEIGHT;
-    if (++scanline >= FRAME_HEIGHT) {
-    	scanline = 0;
-	}
+    // myscanline = (myscanline + 1) % FRAME_HEIGHT;
+    if (++myscanline >= FRAME_HEIGHT) {
+        myscanline = 0;
+    }
 }
 
 int main(void)
@@ -382,7 +397,8 @@ int main(void)
 
     dvi0.timing = &DVI_TIMING;
     dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
-    dvi0.scanline_callback = (dvi_callback_t*)core1_scanline_callback;
+    //dvi0.scanline_callback = (dvi_callback_t*)core1_scanline_callback;
+    dvi0.scanline_callback = core1_scanline_callback;
     dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
 
     uint32_t *bufptr = (uint32_t*)line_buffer;
@@ -419,15 +435,15 @@ int main(void)
 #endif
 
     // OPTIMIZED ORDER for audio + video:
-    // 1. Start PIO audio timer (500Hz chunk processing)
+    // 1. Start audio timer (500Hz chunk processing)
     // 2. Start Core1 (DVI output starts consuming audio)
     // 3. Initialize ADC microphone
     // 4. Initialize GPIO/PIO for DMG controller
     // 5. Register VSYNC interrupt (video capture begins)
 
 #if ENABLE_AUDIO
-    printf("Starting PIO audio timer (500Hz chunk rate)...\n");
-	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer_for_pio);
+    printf("Starting audio timer (500Hz chunk rate)...\n");
+	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer_for_audio);
     printf("Audio system initialized\n");
 #endif
 
@@ -455,11 +471,11 @@ int main(void)
     printf("Analog microphone started successfully - DMA should be running\n");
 #endif
 
-    printf("Initializing GPIO for DMG video capture...\n");
+    printf("Initializing GPIO...\n");
     initialize_gpio();
-#if ENABLE_PIO_DMG
+#if ENABLE_PIO_DMG_BUTTONS
     printf("Initializing PIO programs for DMG controller...\n");
-    initialize_pio_program();
+    initialize_dmg_buttons_pio_program();
 #endif
 
     printf("=== SYSTEM READY - DELAYING BEFORE VIDEO INIT ===\n");
@@ -521,7 +537,7 @@ int main(void)
 
     printf("Entering main loop...\n");
     
-    // Main loop - PIO video + perfect audio
+    // Main loop - PIO video + purdy good audio
     while (true) 
     {
         static uint32_t loop_counter = 0;
@@ -573,11 +589,11 @@ int main(void)
 #endif
         loop_counter++;
         // Poll controller occasionally
-#if ENABLE_PIO_DMG
+#if ENABLE_PIO_DMG_BUTTONS
         if (loop_counter % 100000 == 0) {
             nes_classic_controller();
-            // pio_sm_put(pio_dmg_simple, state_machine, pio_out_value);
-            pio_sm_put(pio_dmg, state_machine, pio_out_value);
+            // pio_sm_put(pio_dmg_simple, dmg_sm, pio_buttons_out_value);
+            pio_sm_put(pio_dmg_buttons, dmg_buttons_sm, pio_buttons_out_value);
         }
 #endif
         
@@ -603,6 +619,7 @@ int main(void)
     __builtin_unreachable();
 }
 
+#if ENABLE_AUDIO
 // static void __not_in_flash_func(on_analog_samples_ready)(void)
 static void on_analog_samples_ready(void)
 {
@@ -612,56 +629,49 @@ static void on_analog_samples_ready(void)
     // Read them into the current write buffer
     int samples_read = analog_microphone_read((int16_t*)adc_write_buffer, ADC_CHUNK_SIZE);
     
-    // Copy the JUST-READ samples (from write buffer) to the fixed buffer that PIO reads from
+    // Copy the JUST-READ samples (from write buffer) to the fixed buffer that timed function reads from
     // We copy from adc_write_buffer because that's what we just filled above!
-    memcpy(sample_buffer_for_pio, (void*)adc_write_buffer, ADC_CHUNK_SIZE * sizeof(int16_t));
+    memcpy(sample_buffer_for_audio, (void*)adc_write_buffer, ADC_CHUNK_SIZE * sizeof(int16_t));
     
     // Atomically swap buffers - get ready for next ADC capture
     volatile int16_t* temp = adc_write_buffer;
     adc_write_buffer = adc_read_buffer;
     adc_read_buffer = temp;
     
-    // Signal that fresh samples are ready
-    adc_buffer_ready = true;
-    
     // Debug output every 1000 callbacks (every ~2 seconds at 64-sample chunks)
     if (++callback_count % 1000 == 0) {
-        printf("ADC callback #%lu: read %d samples, sample[0]=%d, sample_buffer_for_pio[32]=%d\n", 
-               callback_count, samples_read, sample_buffer_for_pio[0], sample_buffer_for_pio[32]);
+        printf("ADC callback #%lu: read %d samples, sample[0]=%d, sample_buffer_for_audio[32]=%d\n", 
+               callback_count, samples_read, sample_buffer_for_audio[0], sample_buffer_for_audio[32]);
     }
 }
+#endif
 
-static long map(long x, long in_min, long in_max, long out_min, long out_max)
-{
-  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
-
-#if ENABLE_PIO_DMG
-static void initialize_pio_program(void)
+#if ENABLE_PIO_DMG_BUTTONS
+static void initialize_dmg_button_pio_program(void)
 {
     static const uint start_in_pin = DMG_READING_BUTTONS_PIN;
     static const uint start_out_pin = DMG_OUTPUT_RIGHT_A_PIN;
 
     // Get first free state machine in PIO 0
-    // state_machine = pio_claim_unused_sm(pio_dmg_simple, true);
-    state_machine = pio_claim_unused_sm(pio_dmg, true);
+    // dmg_sm = pio_claim_unused_sm(pio_dmg_simple, true);
+    dmg_buttons_sm = pio_claim_unused_sm(pio_dmg_buttons, true);
 
     // Add PIO program to PIO instruction memory. SDK will find location and
     // return with the memory offset of the program.
     // uint offset = pio_add_program(pio_dmg_simple, &dmg_simple_program);
-    uint offset = pio_add_program(pio_dmg, &dmg_program);
+    uint offset = pio_add_program(pio_dmg_buttons, &dmg_buttons_program);
 
     // Calculate the PIO clock divider
     // float div = (float)clock_get_hz(clk_sys) / pio_freq;
     float div = (float)2;
 
     // Initialize the program using the helper function in our .pio file
-    // dmg_simple_program_init(pio_dmg_simple, state_machine, offset, start_in_pin, start_out_pin, div);
-    dmg_program_init(pio_dmg, state_machine, offset, start_in_pin, start_out_pin, div);
+    // dmg_simple_program_init(pio_dmg_simple, dmg_sm, offset, start_in_pin, start_out_pin, div);
+    dmg_buttons_program_init(pio_dmg_buttons, dmg_buttons_sm, offset, start_in_pin, start_out_pin, div);
 
     // Start running our PIO program in the state machine
-    // pio_sm_set_enabled(pio_dmg_simple, state_machine, true);
-    pio_sm_set_enabled(pio_dmg, state_machine, true);
+    // pio_sm_set_enabled(pio_dmg_simple, dmg_sm, true);
+    pio_sm_set_enabled(pio_dmg_buttons, dmg_buttons_sm, true);
 }
 #endif
 
@@ -689,45 +699,6 @@ static void initialize_gpio(void)
     gpio_pull_up(SDA_PIN);
 }
 
-// VSYNC interrupt handler - OPTIMIZED FOR SPEED
-// Captures full 160x144 frame in interrupt context (~16ms @ 280MHz)
-// Audio PIO timer (priority 0x00) can still preempt this for smooth audio
-// Minor pixel artifacts acceptable - Game Boy stays stable!
-static void __no_inline_not_in_flash_func(gpio_callback_VIDEO)(uint gpio, uint32_t events)
-{
-    // Fast inline pixel read - no function call overhead
-    #define read_pixel_fast() ({ \
-        while (gpio_get(PIXEL_CLOCK_PIN)); \
-        while (!gpio_get(PIXEL_CLOCK_PIN)); \
-        ((gpio_get(DATA_1_PIN) << 1) | gpio_get(DATA_0_PIN)); \
-    })
-    
-    // Capture entire 160x144 frame into capture buffer
-    // Audio interrupts CAN happen here (causes minor artifacts but keeps audio smooth)
-    uint8_t* fb = framebuffer_capture;
-    
-    for (int y = 0; y < 144; y++) {
-        // Wait for HSYNC
-        while (!gpio_get(HSYNC_PIN));
-        while (gpio_get(HSYNC_PIN));
-        
-        // Capture 160 pixels for this scanline
-        // UNROLLED for speed - process 4 pixels at a time
-        for (int x = 0; x < 160; x += 4) {
-            fb[y * 160 + x + 0] = read_pixel_fast();
-            fb[y * 160 + x + 1] = read_pixel_fast();
-            fb[y * 160 + x + 2] = read_pixel_fast();
-            fb[y * 160 + x + 3] = read_pixel_fast();
-        }
-    }
-    
-    // Atomic swap: make captured frame visible to display core
-    framebuffer_display = fb;
-    framebuffer_capture = (fb == framebuffer_0) ? framebuffer_1 : framebuffer_0;
-    
-    #undef read_pixel_fast
-}
-
 // static bool nes_classic_controller(void)
 static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
 {
@@ -735,9 +706,6 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
     uint32_t current_micros = time_us_32();
     if (current_micros - last_micros < 20000)   // probably longer than it needs to be, NES Classic queries about every 5ms
         return false;
-
-    // No longer need to disable VSYNC IRQ since handler is lightweight now
-    // gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, false);
     
     static bool initialized = false;
     static uint8_t i2c_buffer[16] = {0};
@@ -768,7 +736,6 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
     if (ret < 0)
     {
         last_micros = time_us_32();
-        // gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true);
         return false;
     }
         
@@ -845,21 +812,22 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
     if (button_states[BUTTON_RIGHT] == BUTTON_STATE_PRESSED)
         pins_dpad |= BIT_RIGHT_A;
 
-#if ENABLE_PIO_DMG
+#if ENABLE_PIO_DMG_BUTTONS
     uint8_t pio_report = ~((pins_dpad << 4) | (pins_other&0xF));
-    pio_out_value = (uint32_t)pio_report;
+    pio_buttons_out_value = (uint32_t)pio_report;
 #endif
-
-    // gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true);
 
     return true;
 }
 
+#if ENABLE_CPU_DMG_BUTTONS
 static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t events)
 {
     // Prevent controller input to game if OSD is visible
+#if ENABLE_OSD
     if (OSD_is_enabled())
         return;
+#endif // ENABLE_OSD
 
     if(gpio==DMG_READING_DPAD_PIN)
     {
@@ -905,5 +873,5 @@ static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t eve
         }
     }
 }
-
+#endif // ENABLE_CPU_DMG_BUTTONS
 
