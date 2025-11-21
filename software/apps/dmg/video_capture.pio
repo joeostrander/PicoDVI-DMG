@@ -4,16 +4,15 @@
 ;
 ; Pin mapping (GPIO):
 ;   HSYNC_PIN = 0
-;   DATA_1_PIN = 1  
-;   DATA_0_PIN = 2
+;   DATA_0_PIN = 1
+;   DATA_1_PIN = 2
 ;   PIXEL_CLOCK_PIN = 3
 ;   VSYNC_PIN = 4
 ;
-; Since DATA pins aren't consecutive (1,2 not 0,1), we read from base pin 1:
+; DATA pins are consecutive (1,2), so we read from base pin 1:
 ;   Pin 0 (relative) = GPIO 1 = DATA_1
 ;   Pin 1 (relative) = GPIO 2 = DATA_0
-;   Pin 2 (relative) = GPIO 3 = PIXEL_CLOCK
-; We'll read 2 bits and extract DATA_1,DATA_0 in the right order
+; We'll read 2 bits and get DATA_0 (LSB), DATA_1 (MSB)
 ;
 ; Note: Set instruction can only use 0-31, so we can't loop 40 times directly
 ; Strategy: Loop 20 times capturing 8 pixels each (20 × 8 = 160 pixels)
@@ -23,6 +22,7 @@
 
 .wrap_target
     ; Wait for VSYNC to go high (start of frame)
+    wait 0 gpio 4       ; Wait for VSYNC low
     wait 1 gpio 4       ; Wait for VSYNC high
     
 line_loop:
@@ -37,24 +37,34 @@ line_loop:
 pixel_group_loop:
     ; Capture 8 pixels (4 pixels per autopush, so 2 autopushes)
     ; First 4 pixels
-    wait 1 gpio 3       ; Pixel 1
+    wait 0 gpio 3       ; Pixel 1 (PIXEL_CLOCK)
+    in pins, 2
+    wait 1 gpio 3       ; Pixel 1 (PIXEL_CLOCK)
+    wait 0 gpio 3       ; Pixel 1 (PIXEL_CLOCK)
     in pins, 2
     wait 1 gpio 3       ; Pixel 2
+    wait 0 gpio 3       ; Pixel 2
     in pins, 2
     wait 1 gpio 3       ; Pixel 3
+    wait 0 gpio 3       ; Pixel 3
     in pins, 2
     wait 1 gpio 3       ; Pixel 4
+    wait 0 gpio 3       ; Pixel 4
     in pins, 2          ; Autopush (8 bits)
     
     ; Next 4 pixels
     wait 1 gpio 3       ; Pixel 5
+    wait 0 gpio 3       ; Pixel 5
     in pins, 2
     wait 1 gpio 3       ; Pixel 6
+    wait 0 gpio 3       ; Pixel 6
     in pins, 2
     wait 1 gpio 3       ; Pixel 7
+    wait 0 gpio 3       ; Pixel 7
     in pins, 2
     wait 1 gpio 3       ; Pixel 8
-    in pins, 2          ; Autopush (8 bits)
+    ;wait 0 gpio 3       ; Pixel 8
+    ;NO in pins, 2          ; Autopush (8 bits)
     
     jmp x-- pixel_group_loop  ; Loop for all 20 groups
     
@@ -92,8 +102,7 @@ static inline void video_capture_program_init(PIO pio, uint sm, uint offset)
     // This makes:
     //   pin 0 (relative) = GPIO 1 = DATA_1
     //   pin 1 (relative) = GPIO 2 = DATA_0
-    // So "in pins, 2" reads DATA_1, then DATA_0
-    // The order gets reversed in the shift register, giving us DATA_0, DATA_1 (correct bit order)
+    // So "in pins, 2" reads DATA_0 (LSB), DATA_1 (MSB)
     sm_config_set_in_pins(&c, 1);  // Base = GPIO 1 (DATA_1)
     
     // Configure autopush - push every 8 bits (4 pixels @ 2 bits each)
