@@ -36,35 +36,40 @@ line_loop:
     
 pixel_group_loop:
     ; Capture 8 pixels (4 pixels per autopush, so 2 autopushes)
-    ; First 4 pixels
-    wait 0 gpio 3       ; Pixel 1 (PIXEL_CLOCK)
-    in pins, 2
-    wait 1 gpio 3       ; Pixel 1 (PIXEL_CLOCK)
-    wait 0 gpio 3       ; Pixel 1 (PIXEL_CLOCK)
-    in pins, 2
-    wait 1 gpio 3       ; Pixel 2
-    wait 0 gpio 3       ; Pixel 2
-    in pins, 2
-    wait 1 gpio 3       ; Pixel 3
-    wait 0 gpio 3       ; Pixel 3
-    in pins, 2
-    wait 1 gpio 3       ; Pixel 4
-    wait 0 gpio 3       ; Pixel 4
-    in pins, 2          ; Autopush (8 bits)
     
-    ; Next 4 pixels
-    wait 1 gpio 3       ; Pixel 5
-    wait 0 gpio 3       ; Pixel 5
-    in pins, 2
-    wait 1 gpio 3       ; Pixel 6
-    wait 0 gpio 3       ; Pixel 6
-    in pins, 2
-    wait 1 gpio 3       ; Pixel 7
-    wait 0 gpio 3       ; Pixel 7
-    in pins, 2
-    wait 1 gpio 3       ; Pixel 8
-    ;wait 0 gpio 3       ; Pixel 8
-    ;NO in pins, 2          ; Autopush (8 bits)
+    ; *** First 4 pixels ***
+    wait 0 gpio 3       ; Wait for clock LOW
+    in pins, 2          ; Read pixel 1
+    wait 1 gpio 3       ; Wait for clock HIGH
+
+    wait 0 gpio 3       ; Wait for clock LOW
+    in pins, 2          ; Read pixel 2
+    wait 1 gpio 3       ; Wait for clock HIGH
+
+    wait 0 gpio 3       ; Wait for clock LOW
+    in pins, 2          ; Read pixel 3
+    wait 1 gpio 3       ; Wait for clock HIGH
+    
+    wait 0 gpio 3       ; Wait for clock LOW
+    in pins, 2          ; Read pixel 4, *AUTOPUSH*
+    wait 1 gpio 3       ; Wait for clock HIGH
+
+    ; *** Next 4 pixels ***
+    wait 0 gpio 3       ; Wait for clock LOW
+    in pins, 2          ; Read pixel 5
+    wait 1 gpio 3       ; Wait for clock HIGH
+
+    wait 0 gpio 3       ; Wait for clock LOW
+    in pins, 2          ; Read pixel 6
+    wait 1 gpio 3       ; Wait for clock HIGH
+
+    wait 0 gpio 3       ; Wait for clock LOW
+    in pins, 2          ; Read pixel 7
+    wait 1 gpio 3       ; Wait for clock HIGH
+
+    wait 0 gpio 3       ; Wait for clock LOW
+    in pins, 2          ; Read pixel 8, *AUTOPUSH*
+    wait 1 gpio 3       ; Wait for clock HIGH
     
     jmp x-- pixel_group_loop  ; Loop for all 20 groups
     
