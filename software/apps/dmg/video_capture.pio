@@ -24,10 +24,10 @@
     ; Wait for VSYNC to go high (start of frame)
     wait 0 gpio 4       ; Wait for VSYNC low
     wait 1 gpio 4       ; Wait for VSYNC high
+    wait 1 gpio 0       ; Wait for HSYNC high (blanking)
     
 line_loop:
     ; Wait for HSYNC to start line  
-    wait 1 gpio 0       ; Wait for HSYNC high (blanking)
     wait 0 gpio 0       ; Wait for HSYNC low (active video)
     
     ; Capture 160 pixels in groups of 8
