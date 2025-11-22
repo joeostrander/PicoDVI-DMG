@@ -16,7 +16,7 @@
 #define AUDIO_BUFFER_SIZE   (2048)      // HDMI ring buffer (separate from ADC)
 
 void emu_sndInit(bool playSound, bool reset, audio_ring_t* audio_ring, int16_t* sample_buff);  // JOE ADDED audio_ring, sample buffer
-void emu_generateSoundSamples(void);
+// void emu_generateSoundSamples(void);
 void emu_silenceSound(void);
 uint16_t emu_SoundSampleRate(void);
 

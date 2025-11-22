@@ -12,7 +12,7 @@
 #include "emusound.h"
 
 // Set to 1 to test with sine wave, 0 for real microphone input
-#define TEST_WITH_SINE_WAVE 0  // DISABLED: Pipeline verified, using real Game Boy audio
+#define TEST_WITH_SINE_WAVE 0
 
 static bool __time_critical_func(audio_timer_callback)(__unused repeating_timer_t* rt);
 
@@ -124,9 +124,11 @@ static bool __time_critical_func(audio_timer_callback)(__unused repeating_timer_
             hdmi_buffer[audio_offset].channels[0] = (int16_t)capture_value;
             hdmi_buffer[audio_offset].channels[1] = (int16_t)capture_value;
             audio_offset = (audio_offset + 1) & (hdmi_buffer_size-1);
-        }          if (debug_counter % 1000 == 0) {
-            printf("HDMI[0]=%d (original formula, no extra gain)\n", (int16_t)debug_capture_value);
-        }
+        }          
+        
+        // if (debug_counter % 1000 == 0) {
+        //     printf("HDMI[0]=%d (original formula, no extra gain)\n", (int16_t)debug_capture_value);
+        // }
         set_write_offset(ring, audio_offset);
     }
     

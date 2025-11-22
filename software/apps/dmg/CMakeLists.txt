@@ -8,6 +8,8 @@ add_executable(dmg
     emusound.c
 )
 
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+
 target_compile_options(dmg PRIVATE -Wall)
 
 target_compile_definitions(dmg PRIVATE
@@ -36,6 +38,7 @@ pico_enable_stdio_uart(dmg 0)
 # Build pio programs
 pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/video_capture.pio)
 pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/dmg_buttons.pio)
+pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/dmg_buttons_simple.pio)
 
 
 # create map/bin/hex file etc.

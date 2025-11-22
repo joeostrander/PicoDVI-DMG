@@ -17,6 +17,9 @@
 
 #define ANALOG_RAW_BUFFER_COUNT 2
 
+// Export the DMA channel so the shared handler in main.c can access it
+int audio_dma_chan = -1;
+
 static struct {
     struct analog_microphone_config config;
     int dma_channel;
@@ -30,7 +33,8 @@ static struct {
 } analog_mic;
 
 // static void analog_dma_handler();
-static void __no_inline_not_in_flash_func(analog_dma_handler)(void);
+// static void __no_inline_not_in_flash_func(analog_dma_handler)(void);
+
 
 int analog_microphone_init(const struct analog_microphone_config* config) {
     memset(&analog_mic, 0x00, sizeof(analog_mic));
@@ -52,14 +56,18 @@ int analog_microphone_init(const struct analog_microphone_config* config) {
 
             return -1;   
         }
-    }
-
-    analog_mic.dma_channel = dma_claim_unused_channel(true);
+    }    analog_mic.dma_channel = dma_claim_unused_channel(true);
     if (analog_mic.dma_channel < 0) {
         analog_microphone_deinit();
 
         return -1;
     }
+    
+    // Store in global for shared handler
+    audio_dma_chan = analog_mic.dma_channel;
+    audio_dma_chan = analog_mic.dma_channel; // Export DMA channel for audio
+    printf("Audio DMA channel: %d\n", audio_dma_chan);
+
 
     float clk_div = (clock_get_hz(clk_adc) / (1.0 * config->sample_rate)) - 1;    dma_channel_config dma_channel_cfg = dma_channel_get_default_config(analog_mic.dma_channel);
 
@@ -115,8 +123,9 @@ void analog_microphone_deinit() {
 }
 
 int analog_microphone_start() {
-    irq_set_enabled(analog_mic.dma_irq, true);
-    irq_set_exclusive_handler(analog_mic.dma_irq, analog_dma_handler);
+    // Don't set handler here - the shared handler will be set up in main.c
+    // irq_set_enabled(analog_mic.dma_irq, true);
+    // irq_set_exclusive_handler(analog_mic.dma_irq, analog_dma_handler);
 
     if (analog_mic.dma_irq == DMA_IRQ_0) {
         dma_channel_set_irq0_enabled(analog_mic.dma_channel, true);
@@ -155,7 +164,8 @@ void analog_microphone_stop() {
 }
 
 // static void analog_dma_handler() 
-static void __no_inline_not_in_flash_func(analog_dma_handler)(void)
+// static void __no_inline_not_in_flash_func(analog_dma_handler)(void)
+void __no_inline_not_in_flash_func(analog_dma_handler)(void)
 {
     // clear IRQ
     if (analog_mic.dma_irq == DMA_IRQ_0) {

@@ -27,4 +27,8 @@ void analog_microphone_set_samples_ready_handler(analog_samples_ready_handler_t 
 
 int analog_microphone_read(int16_t* buffer, size_t samples);
 
+void __no_inline_not_in_flash_func(analog_dma_handler)(void);
+
+extern int audio_dma_chan;
+
 #endif

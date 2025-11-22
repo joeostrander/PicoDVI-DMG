@@ -1,12 +1,8 @@
 /*
 
 TODO:
-    get audio working again
-    - maybe go back to PIO IRQ timing instead of timer
-    - try changing initialization order?
-    get controls working again
-    - verify PIO program re-added correctly
-    - will it even work on PIO0 (are there enough instructions available?)
+
+    fix controls issue (random start button press)
 
     Get HDMI (DVI) working on real TV?
     Possibly pull in some of the OSD features from PicoDVI-N64
@@ -45,7 +41,7 @@ TODO:
 #include "dvi_serialiser.h"
 #include "common_dvi_pin_configs.h"
 #include "dmg_buttons.pio.h"
-// #include "dmg_simple.pio.h"
+#include "dmg_buttons_simple.pio.h"
 #include "tmds_encode.h"
 #include "audio_ring.h"  // For get_write_size and get_read_size
 
@@ -55,11 +51,13 @@ TODO:
 #include "hardware/pwm.h"
 #include "analog_microphone.h"
 #include "emusound.h"
-#include "video_capture.pio.h"  // PIO-based video capture - COMMENTED OUT FOR TESTING
+#include "video_capture.pio.h"  // PIO-based video capture
+#include "video_capture_user.h"
 
-#define ENABLE_AUDIO 0  // Set to 1 to enable audio, 0 to disable all audio code
+#define ENABLE_AUDIO 1  // Set to 1 to enable audio, 0 to disable all audio code
 #define ENABLE_PIO_DMG_BUTTONS 0  // Set to 1 to enable DMG PIO controller, 0 to disable
-#define ENABLE_CPU_DMG_BUTTONS 0  // Set to 1 to enable DMG CPU sending of buttons, 0 to disable
+#define ENABLE_PIO_DMG_BUTTONS_SIMPLE 0  // Set to 1 to enable DMG PIO controller, 0 to disable
+#define ENABLE_CPU_DMG_BUTTONS 1  // Set to 1 to enable DMG CPU sending of buttons, 0 to disable
 #define ENABLE_VIDEO_CAPTURE 1
 #define ENABLE_OSD 0  // Set to 1 to enable OSD code, 0 to disable (TODO)
 
@@ -109,7 +107,7 @@ i2c_inst_t* i2cHandle = i2c1;
 // Double buffering: one for capture, one for display
 static uint8_t framebuffer_0[DMG_PIXEL_COUNT] = {0};
 static uint8_t framebuffer_1[DMG_PIXEL_COUNT] = {0};
-static uint8_t framebuffer_previous[DMG_PIXEL_COUNT] = {0};
+// static uint8_t framebuffer_previous[DMG_PIXEL_COUNT] = {0};
 
 // Packed DMA buffers - 4 pixels per byte (2 bits each)
 #define PACKED_FRAME_SIZE (DMG_PIXEL_COUNT / 4)  // 5760 bytes
@@ -155,6 +153,11 @@ typedef enum
 static PIO pio_dmg_buttons = pio0;
 static uint dmg_buttons_sm = 3;  // Use SM3 (SM0, SM1, SM2 used by DVI TMDS channels)
 static uint pio_buttons_out_value = 0;
+#endif
+#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
+static PIO pio_dmg_buttons_simple = pio0;
+static uint dmg_buttons_simple_sm = 3;  // Use SM3 (SM0, SM1, SM2 used by DVI TMDS channels)
+static uint pio_buttons_simple_out_value = 0;
 #endif
 
 // PIO video capture
@@ -278,6 +281,9 @@ static void initialize_gpio(void);
 #if ENABLE_PIO_DMG_BUTTONS
 static void initialize_dmg_buttons_pio_program(void);
 #endif
+#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
+static void initialize_dmg_buttons_simple_pio_program(void);
+#endif
 #if ENABLE_CPU_DMG_BUTTONS
 static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t events);
 #endif
@@ -292,6 +298,10 @@ void core1_main(void)
     dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
     dvi_start(&dvi0);
     dvi_scanbuf_main_8bpp(&dvi0);
+
+
+    // gpio_set_irq_enabled_with_callback(DMG_READING_DPAD_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
+    // gpio_set_irq_enabled_with_callback(DMG_READING_BUTTONS_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
 
 	// uint y = 0;
 	// while (1) 
@@ -325,7 +335,8 @@ void core1_main(void)
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
 {
     // Note first two scanlines are pushed before DVI start
-    static uint myscanline = 2;
+    //static uint myscanline = 2;
+    uint myscanline = scanline;
     uint idx = 0;
     uint border_horz = 40;
     uint border_vert = 3;
@@ -445,6 +456,12 @@ int main(void)
     printf("Starting audio timer (500Hz chunk rate)...\n");
 	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer_for_audio);
     printf("Audio system initialized\n");
+    
+    // Set up shared DMA IRQ handler for both audio and video on DMA_IRQ_1
+    printf("Setting up shared DMA IRQ handler on DMA_IRQ_1...\n");
+    irq_set_exclusive_handler(DMA_IRQ_1, shared_dma_irq_handler);
+    irq_set_enabled(DMA_IRQ_1, true);
+    printf("Shared DMA IRQ handler installed\n");
 #endif
 
     // Always start DVI output on Core 1, regardless of audio
@@ -477,6 +494,18 @@ int main(void)
     printf("Initializing PIO programs for DMG controller...\n");
     initialize_dmg_buttons_pio_program();
 #endif
+#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
+    printf("Initializing PIO programs for DMG controller...\n");
+    initialize_dmg_buttons_simple_pio_program();
+#endif
+#if ENABLE_CPU_DMG_BUTTONS
+    printf("Setting up GPIO IRQ for DMG controller...\n");
+    // Setup GPIO IRQ for DMG controller reading
+    //TODO!
+    gpio_set_irq_enabled_with_callback(DMG_READING_DPAD_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
+    gpio_set_irq_enabled_with_callback(DMG_READING_BUTTONS_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
+
+#endif
 
     printf("=== SYSTEM READY - DELAYING BEFORE VIDEO INIT ===\n");
     printf("Waiting 7 seconds...\n");
@@ -492,6 +521,9 @@ int main(void)
     printf("\n*** PAST COUNTDOWN ***\n");
     stdio_flush();
     sleep_ms(500);
+
+
+
     
 #if ENABLE_VIDEO_CAPTURE
     printf("Skipping video initialization (commented out for testing)\n");
@@ -521,7 +553,9 @@ int main(void)
     printf("Step 3: About to initialize DMA...\n");
     stdio_flush();
     
-    video_capture_dma_init(pio_video, video_sm, packed_buffer_0, PACKED_FRAME_SIZE);
+    
+    // Enable DMA interrupt - use IRQ1 (IRQ0 is used by DVI on Core 1)    
+    video_capture_dma_init(pio_video, video_sm, DMA_IRQ_1, packed_buffer_0, PACKED_FRAME_SIZE);
     
     printf("  -> DMA initialized (packed format: %d bytes)\n", PACKED_FRAME_SIZE);
     stdio_flush();
@@ -536,6 +570,7 @@ int main(void)
     bool video_capture_active = false;
 
     printf("Entering main loop...\n");
+
     
     // Main loop - PIO video + purdy good audio
     while (true) 
@@ -590,18 +625,31 @@ int main(void)
         loop_counter++;
         // Poll controller occasionally
 #if ENABLE_PIO_DMG_BUTTONS
-        if (loop_counter % 100000 == 0) {
-            nes_classic_controller();
+        if (nes_classic_controller()) 
+        {
             // pio_sm_put(pio_dmg_simple, dmg_sm, pio_buttons_out_value);
             pio_sm_put(pio_dmg_buttons, dmg_buttons_sm, pio_buttons_out_value);
+        }
+#endif
+#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
+        if (nes_classic_controller()) 
+        {
+            // pio_sm_put(pio_dmg_simple, dmg_sm, pio_buttons_out_value);
+            pio_sm_put(pio_dmg_buttons_simple, dmg_buttons_simple_sm, pio_buttons_simple_out_value);
+        }
+#endif
+#if ENABLE_CPU_DMG_BUTTONS
+        // if (loop_counter % 100000 == 0) 
+        {
+            nes_classic_controller();
         }
 #endif
         
         // Blink LED and print stats
         if (loop_counter % 1000000 == 0) {
-            static bool led_state = false;
-            led_state = !led_state;
-            gpio_put(ONBOARD_LED_PIN, led_state);
+            // static bool led_state = false;
+            // led_state = !led_state;
+            // gpio_put(ONBOARD_LED_PIN, led_state);
 #if ENABLE_AUDIO
             int write_size = get_write_size(&dvi0.audio_ring, false);
             int read_size = get_read_size(&dvi0.audio_ring, false);
@@ -647,7 +695,7 @@ static void on_analog_samples_ready(void)
 #endif
 
 #if ENABLE_PIO_DMG_BUTTONS
-static void initialize_dmg_button_pio_program(void)
+static void initialize_dmg_buttons_pio_program(void)
 {
     static const uint start_in_pin = DMG_READING_BUTTONS_PIN;
     static const uint start_out_pin = DMG_OUTPUT_RIGHT_A_PIN;
@@ -674,6 +722,34 @@ static void initialize_dmg_button_pio_program(void)
     pio_sm_set_enabled(pio_dmg_buttons, dmg_buttons_sm, true);
 }
 #endif
+#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
+static void initialize_dmg_buttons_simple_pio_program(void)
+{
+    static const uint start_in_pin = DMG_READING_BUTTONS_PIN;
+    static const uint start_out_pin = DMG_OUTPUT_RIGHT_A_PIN;
+
+    // Get first free state machine in PIO 0
+    // dmg_sm = pio_claim_unused_sm(pio_dmg_simple, true);
+    dmg_buttons_simple_sm = pio_claim_unused_sm(pio_dmg_buttons_simple, true);
+
+    // Add PIO program to PIO instruction memory. SDK will find location and
+    // return with the memory offset of the program.
+    // uint offset = pio_add_program(pio_dmg_simple, &dmg_simple_program);
+    uint offset = pio_add_program(pio_dmg_buttons_simple, &dmg_buttons_simple_program);
+
+    // Calculate the PIO clock divider
+    // float div = (float)clock_get_hz(clk_sys) / pio_freq;
+    float div = (float)2;
+
+    // Initialize the program using the helper function in our .pio file
+    // dmg_simple_program_init(pio_dmg_simple, dmg_sm, offset, start_in_pin, start_out_pin, div);
+    dmg_buttons_simple_program_init(pio_dmg_buttons_simple, dmg_buttons_simple_sm, offset, start_in_pin, start_out_pin, div);
+
+    // Start running our PIO program in the state machine
+    // pio_sm_set_enabled(pio_dmg_simple, dmg_sm, true);
+    pio_sm_set_enabled(pio_dmg_buttons_simple, dmg_buttons_simple_sm, true);
+}
+#endif
 
 static void initialize_gpio(void)
 {    
@@ -697,6 +773,29 @@ static void initialize_gpio(void)
     gpio_set_function(SDA_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(SCL_PIN);
     gpio_pull_up(SDA_PIN);
+
+
+    gpio_init(DMG_OUTPUT_RIGHT_A_PIN);
+    gpio_set_dir(DMG_OUTPUT_RIGHT_A_PIN, GPIO_OUT);
+    gpio_put(DMG_OUTPUT_RIGHT_A_PIN, 1);
+
+    gpio_init(DMG_OUTPUT_LEFT_B_PIN);
+    gpio_set_dir(DMG_OUTPUT_LEFT_B_PIN, GPIO_OUT);
+    gpio_put(DMG_OUTPUT_LEFT_B_PIN, 1);
+
+    gpio_init(DMG_OUTPUT_UP_SELECT_PIN);
+    gpio_set_dir(DMG_OUTPUT_UP_SELECT_PIN, GPIO_OUT);
+    gpio_put(DMG_OUTPUT_UP_SELECT_PIN, 1);
+
+    gpio_init(DMG_OUTPUT_DOWN_START_PIN);
+    gpio_set_dir(DMG_OUTPUT_DOWN_START_PIN, GPIO_OUT);
+    gpio_put(DMG_OUTPUT_DOWN_START_PIN, 1);
+
+    gpio_init(DMG_READING_DPAD_PIN);
+    gpio_set_dir(DMG_READING_DPAD_PIN, GPIO_IN);
+
+    gpio_init(DMG_READING_BUTTONS_PIN);
+    gpio_set_dir(DMG_READING_BUTTONS_PIN, GPIO_IN);
 }
 
 // static bool nes_classic_controller(void)
@@ -816,6 +915,10 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
     uint8_t pio_report = ~((pins_dpad << 4) | (pins_other&0xF));
     pio_buttons_out_value = (uint32_t)pio_report;
 #endif
+#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
+    uint8_t pio_report = ~((pins_dpad << 4) | (pins_other&0xF));
+    pio_buttons_simple_out_value = (uint32_t)pio_report;
+#endif
 
     return true;
 }
@@ -875,3 +978,22 @@ static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t eve
 }
 #endif // ENABLE_CPU_DMG_BUTTONS
 
+
+
+void __isr shared_dma_irq_handler()
+{
+    uint32_t ints = dma_hw->ints1;
+
+    // Video DMA
+    if (ints & (1u << video_dma_chan)) {
+        dma_hw->ints1 = (1u << video_dma_chan);
+        video_frame_ready = true;
+    }
+
+    // Audio DMA
+    if (ints & (1u << audio_dma_chan)) {
+        dma_hw->ints1 = (1u << audio_dma_chan);
+        // Call your audio DMA completion logic here, e.g.:
+        analog_dma_handler(); // or set a flag, or call the handler directly
+    }
+}

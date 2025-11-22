@@ -82,15 +82,17 @@ pixel_group_loop:
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
+#include "video_capture_user.h"
 
 // NOTE: Variables moved to main.c to avoid static initialization conflicts
 // Declare as extern here
 extern int video_dma_chan;
+extern int audio_dma_chan;
 extern volatile bool video_frame_ready;
 extern volatile uint8_t* video_completed_frame;
 
 // DMA completion handler
-static void __isr video_dma_handler() {
+void __isr video_dma_handler() {
     // Clear the interrupt - use IRQ1 (IRQ0 is used by DVI)
     dma_hw->ints1 = 1u << video_dma_chan;
     
@@ -125,7 +127,7 @@ static inline void video_capture_program_init(PIO pio, uint sm, uint offset)
 }
 
 // Initialize DMA for video capture  
-static inline void video_capture_dma_init(PIO pio, uint sm, 
+static inline void video_capture_dma_init(PIO pio, uint sm, uint irq_num,
     uint8_t* framebuffer, size_t frame_size)
 {
     // Claim DMA channel
@@ -149,9 +151,16 @@ static inline void video_capture_dma_init(PIO pio, uint sm,
         frame_size,             // Transfer size in bytes
         false                   // Don't start yet
     );
-      // Enable DMA interrupt - use IRQ1 (IRQ0 is used by DVI on Core 1)
-    dma_channel_set_irq1_enabled(video_dma_chan, true);    irq_set_exclusive_handler(DMA_IRQ_1, video_dma_handler);
-    irq_set_enabled(DMA_IRQ_1, true);
+
+    // Enable DMA interrupt on the specified IRQ
+    // Don't call irq_set_exclusive_handler here - the shared handler is already set up in main.c
+    if (irq_num == DMA_IRQ_0) {
+        dma_channel_set_irq0_enabled(video_dma_chan, true);
+    }
+    else {
+        dma_channel_set_irq1_enabled(video_dma_chan, true);
+    }
+    // Don't enable the IRQ here - it's already enabled by audio initialization
     
     video_frame_ready = false;
 }
