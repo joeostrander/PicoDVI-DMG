@@ -1,41 +1,42 @@
 ; Joe Ostrander
 ; 2023
 
-.program dmg
+.program dmg_buttons
 
 set pins, 0b1111
 forever:
     mov osr, pins
-    out x, 1
-    out y, 1
+    out x, 1        ; P14 pin state (dpad read)
+    out y, 1        ; P15 pin state (other buttons read)
     jmp !y other
     jmp !x dpad
     set pins, 0b1111
     jmp forever
 dpad:
     mov pins, x
-    wait 1 pin 0    ; wait for pin 0 to go high
+    wait 1 pin 1    ; wait for pin 1 to go high
     jmp forever
 other:
     pull    ; refresh OSR with data from main application
     out y, 4
     out x, 4
     mov pins, y
-    wait 1 pin 1    ; wait for pin 1 to go high
-    wait 0 pin 0    ; wait for pin 0 to go low, then report dpad
+    wait 1 pin 0    ; wait for pin 0 to go high
+    wait 0 pin 1    ; wait for pin 1 to go low, then report dpad
     jmp dpad
 
 % c-sdk {
 
-#define IN_PIN_COUNT    2   // P14 & P15  
-#define OUT_PIN_COUNT   4   // P10 to P13 (not in that order currently)
+// pin order is based off PCB design
+#define IN_PIN_COUNT    2   // P15,P14
+#define OUT_PIN_COUNT   4   // P10,P12,P13,P11
 
 // Helper function (for use in C program) to initialize this PIO program
-void dmg_program_init(PIO pio, uint sm, uint offset, uint in_pin_start, uint out_pin_start, float div) 
+void dmg_buttons_program_init(PIO pio, uint sm, uint offset, uint in_pin_start, uint out_pin_start, float div) 
 {
     // Sets up state machine and wrap target. This function is automatically
-    // generated in dmg.pio.h.
-    pio_sm_config config = dmg_program_get_default_config(offset);
+    // generated in dmg_buttons.pio.h.
+    pio_sm_config config = dmg_buttons_program_get_default_config(offset);
 
     // Allow PIO to control GPIO pin (as output)
     for (int i = 0; i < OUT_PIN_COUNT; i++)

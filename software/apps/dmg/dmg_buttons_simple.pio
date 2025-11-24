@@ -1,0 +1,82 @@
+; Joe Ostrander
+; 2025
+; TODO: TEST THIS!
+
+.program dmg_buttons_simple
+
+pull block          ; 1
+mov x, osr          ; 2
+
+loop:
+    in pins, 2          ; 3   ; Read select lines (pins 5,6)
+    jmp pin, p15        ; 4   ; If pin 5 high, output P15 group
+    mov osr, x          ; 5
+    out pins, 4         ; 6   ; Output lower 4 bits (P14 group)
+    jmp loop            ; 7
+
+p15:
+    mov osr, x          ; 8
+    out null, 4         ; 9   ; Skip lower 4 bits
+    out pins, 4         ; 10  ; Output upper 4 bits (P15 group)
+    jmp loop            ; 11
+
+; pull block         ; Wait for button data from CPU (8 bits: upper 4 = P15, lower 4 = P14)
+; mov x, osr         ; Save to X
+
+; loop:
+;     in pins, 2     ; Read select lines (pins 5 and 6, e.g. GPIO 5 and 6)
+;     mov y, isr     ; Save select state to Y
+;     mov osr, x     ; Restore button data
+
+;     jmp pin 5, p15_selected
+;     ; else, P14 selected
+;     out pins, 4    ; Output lower 4 bits (P14 group) to pins 7-10
+;     jmp loop
+
+; p15_selected:
+;     mov osr, x
+;     mov isr, osr
+;     push block     ; Optionally, push for debug
+;     mov osr, x
+;     out null, 4    ; Skip lower 4 bits
+;     out pins, 4    ; Output upper 4 bits (P15 group) to pins 7-10
+;     jmp loop
+
+% c-sdk {
+
+// pin order is based off PCB design
+#define IN_PIN_COUNT    2   // P15,P14
+#define OUT_PIN_COUNT   4   // P10,P12,P13,P11
+
+// Helper function (for use in C program) to initialize this PIO program
+void dmg_buttons_simple_program_init(PIO pio, uint sm, uint offset, uint in_pin_start, uint out_pin_start, float div) 
+{
+    // Sets up state machine and wrap target. This function is automatically
+    // generated in dmg.pio.h.
+    pio_sm_config config = dmg_buttons_simple_program_get_default_config(offset);
+
+    // Allow PIO to control GPIO pin (as output)
+    for (int i = 0; i < OUT_PIN_COUNT; i++)
+    {
+        pio_gpio_init(pio, out_pin_start+i);
+    }
+
+    // Set and initialize the input pins
+    sm_config_set_in_pins(&config, in_pin_start);
+    pio_sm_set_consecutive_pindirs(pio, sm, in_pin_start, IN_PIN_COUNT, false);
+
+    // Connect pin to SET pin (control with 'set' instruction)
+    sm_config_set_set_pins(&config, out_pin_start, 4);
+
+    // Set and initialize the output pins
+    sm_config_set_out_pins(&config, out_pin_start, OUT_PIN_COUNT);
+    pio_sm_set_consecutive_pindirs(pio, sm, out_pin_start, OUT_PIN_COUNT, true);
+    
+    // Set the clock divider for the state machine
+    sm_config_set_clkdiv(&config, div);
+
+    // Load configuration and jump to start of the program
+    pio_sm_init(pio, sm, offset, &config);
+}
+
+%}
