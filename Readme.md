@@ -4,6 +4,8 @@
 
 ![gameplay preview](./images/gameplay.gif?raw=true)  
 
+![pcb rev 1](./images/pcb_rev1.jpg?raw=true)  
+
 ![hardware](./images/hardware.jpg?raw=true)  
 
 ![dmg theme](./images/preview_dmg.jpg?raw=true)  
@@ -33,7 +35,8 @@ You need to have the Pico SDK installed, as well as a recent CMake and arm-none-
 ```bash
 mkdir build
 cd build
-PICO_SDK_PATH=path/to/sdk cmake -DPICO_COPY_TO_RAM=1 ..
+PICO_SDK_PATH=path/to/sdk 
+cmake -DPICO_COPY_TO_RAM=1 ..
 make -j$(nproc)
 ```
 Note:  on Windows I use:  
