@@ -1,19 +1,16 @@
 # PicoDVI-DMG  
 
-## This project allows Gameboy DMG DVI output via HDMI using PicoDVI  
-
-NOTE:  I do have a version with HDMI audio working... but it doesn't work very well! :(  
-If you think you might be able to help with the audio portion feel free to message me (my username at protonmail.com)  
+## This project allows Gameboy DMG DVI output via HDMI using PicoDVI
 
 ![gameplay preview](./images/gameplay.gif?raw=true)  
+
+![pcb rev 1](./images/pcb_rev1.jpg?raw=true)  
 
 ![hardware](./images/hardware.jpg?raw=true)  
 
 ![dmg theme](./images/preview_dmg.jpg?raw=true)  
 
 ![gbp theme](./images/preview_gbp.jpg?raw=true)  
-
-![pcb rev 1](./images/pcb_rev1.jpg?raw=true)  
 
 
 
@@ -38,7 +35,8 @@ You need to have the Pico SDK installed, as well as a recent CMake and arm-none-
 ```bash
 mkdir build
 cd build
-PICO_SDK_PATH=path/to/sdk cmake -DPICO_COPY_TO_RAM=1 ..
+PICO_SDK_PATH=path/to/sdk 
+cmake -DPICO_COPY_TO_RAM=1 ..
 make -j$(nproc)
 ```
 Note:  on Windows I use:  
