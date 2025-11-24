@@ -6,6 +6,7 @@ add_executable(dmg
     main.c
     analog_microphone.c
     emusound.c
+		shared_dma_handler.c
 )
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})

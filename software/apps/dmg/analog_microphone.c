@@ -12,13 +12,13 @@
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
-
+#include "shared_dma_handler.h"
+#include <stdio.h>
 #include "analog_microphone.h"
 
 #define ANALOG_RAW_BUFFER_COUNT 2
 
-// Export the DMA channel so the shared handler in main.c can access it
-int audio_dma_chan = -1;
+static int audio_dma_chan = -1;
 
 static struct {
     struct analog_microphone_config config;
@@ -33,8 +33,7 @@ static struct {
 } analog_mic;
 
 // static void analog_dma_handler();
-// static void __no_inline_not_in_flash_func(analog_dma_handler)(void);
-
+static void __no_inline_not_in_flash_func(analog_dma_handler)(void);
 
 int analog_microphone_init(const struct analog_microphone_config* config) {
     memset(&analog_mic, 0x00, sizeof(analog_mic));
@@ -66,8 +65,14 @@ int analog_microphone_init(const struct analog_microphone_config* config) {
     // Store in global for shared handler
     audio_dma_chan = analog_mic.dma_channel;
     audio_dma_chan = analog_mic.dma_channel; // Export DMA channel for audio
-    printf("Audio DMA channel: %d\n", audio_dma_chan);
-
+    if (!SHARED_DMA_RegisterCallback(audio_dma_chan, analog_dma_handler))
+    {
+        printf("ERROR: Failed to register DMA callback for channel %d\n", audio_dma_chan);
+        analog_microphone_deinit();
+        return -1;
+    }
+    printf("Registered DMA callback for channel: %d\n", audio_dma_chan);
+    
 
     float clk_div = (clock_get_hz(clk_adc) / (1.0 * config->sample_rate)) - 1;    dma_channel_config dma_channel_cfg = dma_channel_get_default_config(analog_mic.dma_channel);
 
@@ -122,16 +127,22 @@ void analog_microphone_deinit() {
     }
 }
 
-int analog_microphone_start() {
+int analog_microphone_start() 
+{
     // Don't set handler here - the shared handler will be set up in main.c
     // irq_set_enabled(analog_mic.dma_irq, true);
     // irq_set_exclusive_handler(analog_mic.dma_irq, analog_dma_handler);
 
-    if (analog_mic.dma_irq == DMA_IRQ_0) {
+    if (analog_mic.dma_irq == DMA_IRQ_0) 
+    {
         dma_channel_set_irq0_enabled(analog_mic.dma_channel, true);
-    } else if (analog_mic.dma_irq == DMA_IRQ_1) {
+    } 
+    else if (analog_mic.dma_irq == DMA_IRQ_1) 
+    {
         dma_channel_set_irq1_enabled(analog_mic.dma_channel, true);
-    } else {
+    } 
+    else 
+    {
         return -1;
     }
 
@@ -164,8 +175,7 @@ void analog_microphone_stop() {
 }
 
 // static void analog_dma_handler() 
-// static void __no_inline_not_in_flash_func(analog_dma_handler)(void)
-void __no_inline_not_in_flash_func(analog_dma_handler)(void)
+static void __no_inline_not_in_flash_func(analog_dma_handler)(void)
 {
     // clear IRQ
     if (analog_mic.dma_irq == DMA_IRQ_0) {

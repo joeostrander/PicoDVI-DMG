@@ -2,7 +2,8 @@
 
 TODO:
 
-    fix vsync issue
+    fix vsync issue?
+
 
     Get HDMI (DVI) working on real TV?
     Possibly pull in some of the OSD features from PicoDVI-N64
@@ -52,7 +53,7 @@ TODO:
 #include "analog_microphone.h"
 #include "emusound.h"
 #include "video_capture.pio.h"  // PIO-based video capture
-#include "video_capture_user.h"
+#include "shared_dma_handler.h"
 
 #define ENABLE_AUDIO 1  // Set to 1 to enable audio, 0 to disable all audio code
 #define ENABLE_PIO_DMG_BUTTONS 0  // Set to 1 to enable DMG PIO controller, 0 to disable
@@ -178,10 +179,6 @@ static uint video_offset = 0;
 static uint8_t button_states[BUTTON_COUNT];
 static uint8_t button_states_previous[BUTTON_COUNT];
 
-// Video capture state variables (used by video_capture.pio functions)
-int video_dma_chan = -1;
-volatile bool video_frame_ready = false;
-volatile uint8_t* video_completed_frame = NULL;
 
 // Frame swapping synchronization - use atomic pointer swap
 volatile uint8_t* volatile framebuffer_display_ptr = NULL;
@@ -205,7 +202,7 @@ const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
 	.v_back_porch      = 22,
 	.v_active_lines    = 600,
 
-	.bit_clk_khz       = 280000     // 400K .... toooo much!
+	.bit_clk_khz       = 280000
 };
 
 // #define VREG_VSEL VREG_VOLTAGE_1_25  // Increased from 1.20V for stable 280 MHz clocks
@@ -439,12 +436,12 @@ int main(void)
 	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer_for_audio);
     printf("Audio system initialized\n");
     
+#endif
+
     // Set up shared DMA IRQ handler for both audio and video on DMA_IRQ_1
     printf("Setting up shared DMA IRQ handler on DMA_IRQ_1...\n");
-    irq_set_exclusive_handler(DMA_IRQ_1, shared_dma_irq_handler);
-    irq_set_enabled(DMA_IRQ_1, true);
+    SHARED_DMA_Init(DMA_IRQ_1);
     printf("Shared DMA IRQ handler installed\n");
-#endif
 
     // Always start DVI output on Core 1, regardless of audio
     printf("Starting Core 1 (DVI output)...\n");
@@ -491,61 +488,71 @@ int main(void)
 
 #endif
 
-    printf("=== SYSTEM READY - DELAYING BEFORE VIDEO INIT ===\n");
-    printf("Waiting 7 seconds...\n");
-    stdio_flush();
+    // printf("=== SYSTEM READY - DELAYING BEFORE VIDEO INIT ===\n");
+    // printf("Waiting 7 seconds...\n");
+    // stdio_flush();
     
-    // Long delay - let everything stabilize
-    for (int i = 7; i > 0; i--) {
-        printf("%d...\n", i);
-        stdio_flush();
-        sleep_ms(1000);
-    }
+    // // Long delay - let everything stabilize
+    // for (int i = 7; i > 0; i--) {
+    //     printf("%d...\n", i);
+    //     stdio_flush();
+    //     sleep_ms(1000);
+    // }
     
-    printf("\n*** PAST COUNTDOWN ***\n");
-    stdio_flush();
-    sleep_ms(500);
+    // printf("\n*** PAST COUNTDOWN ***\n");
+    // stdio_flush();
+    // sleep_ms(500);
 
 
 
     
 #if ENABLE_VIDEO_CAPTURE
-    printf("Skipping video initialization (commented out for testing)\n");
-    stdio_flush();
+    // printf("Skipping video initialization (commented out for testing)\n");
+    // stdio_flush();
     
-    printf("Starting video initialization NOW...\n");
-    stdio_flush();
-    sleep_ms(100);
+    // printf("Starting video initialization NOW...\n");
+    // stdio_flush();
+    // sleep_ms(100);
     
-    printf("Step 1: About to call pio_add_program()...\n");
-    stdio_flush();
-    sleep_ms(100);
+    // printf("Step 1: About to call pio_add_program()...\n");
+    // stdio_flush();
+    // sleep_ms(100);
     
     video_offset = pio_add_program(pio_video, &video_capture_program);
     
-    printf("  -> Loaded at offset %d\n", video_offset);
-    stdio_flush();
+    // printf("  -> Loaded at offset %d\n", video_offset);
+    // stdio_flush();
     
-    printf("Step 2: About to initialize PIO state machine...\n");
-    stdio_flush();
+    // printf("Step 2: About to initialize PIO state machine...\n");
+    // stdio_flush();
     
     video_capture_program_init(pio_video, video_sm, video_offset);
     
-    printf("  -> State machine initialized\n");
-    stdio_flush();
+    // printf("  -> State machine initialized\n");
+    // stdio_flush();
     
-    printf("Step 3: About to initialize DMA...\n");
-    stdio_flush();
+    // printf("Step 3: About to initialize DMA...\n");
+    // stdio_flush();
     
     
     // Enable DMA interrupt - use IRQ1 (IRQ0 is used by DVI on Core 1)    
-    video_capture_dma_init(pio_video, video_sm, DMA_IRQ_1, packed_buffer_0, PACKED_FRAME_SIZE);
+    int video_dma_chan = video_capture_dma_init(pio_video, video_sm, DMA_IRQ_1, packed_buffer_0, PACKED_FRAME_SIZE);
+    if (video_dma_chan < 0)
+    {
+        printf("ERROR: Video capture DMA initialization failed!\n");
+        while (1) { tight_loop_contents(); }
+    }
+    if (!SHARED_DMA_RegisterCallback(video_dma_chan, video_capture_dma_irq_handler)) 
+    {
+        printf("ERROR: Video capture DMA callback registration failed!\n");
+        while (1) { tight_loop_contents(); }
+    }
     
     printf("  -> DMA initialized (packed format: %d bytes)\n", PACKED_FRAME_SIZE);
     stdio_flush();
     
-    printf("If you see this, the countdown works fine\n");
-    stdio_flush();
+    // printf("If you see this, the countdown works fine\n");
+    // stdio_flush();
 #endif
 
     // Track which packed buffer is being captured
@@ -631,30 +638,9 @@ int main(void)
         }
 #endif
 #if ENABLE_CPU_DMG_BUTTONS
-        // if (loop_counter % 100000 == 0) 
-        {
-            nes_classic_controller();
-        }
+        nes_classic_controller();
 #endif
 
-        // Blink LED and print stats
-        if (loop_counter % 1000000 == 0) {
-            // static bool led_state = false;
-            // led_state = !led_state;
-            // gpio_put(ONBOARD_LED_PIN, led_state);
-#if ENABLE_AUDIO
-            int write_size = get_write_size(&dvi0.audio_ring, false);
-            int read_size = get_read_size(&dvi0.audio_ring, false);
-            int fill_level = AUDIO_BUFFER_SIZE - write_size;
-            // if (video_capture_active) {
-            //     printf("Frames: %lu | Audio: %d/%d (w=%d r=%d)\n",
-            //            frames_captured, fill_level, AUDIO_BUFFER_SIZE, write_size, read_size);
-            // } else {
-            //     printf("Loop %lu - waiting to start video | Audio: %d/%d\n", 
-            //            loop_counter, fill_level, AUDIO_BUFFER_SIZE);
-            // }
-#endif
-        }
     }
     __builtin_unreachable();
 }
@@ -974,31 +960,3 @@ static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t eve
     }
 }
 #endif // ENABLE_CPU_DMG_BUTTONS
-
-
-
-void __isr shared_dma_irq_handler()
-{
-    uint32_t ints = dma_hw->ints1;
-
-    // Video DMA
-    if (ints & (1u << video_dma_chan)) {
-        dma_hw->ints1 = (1u << video_dma_chan);
-        
-        // DO NOT disable PIO here - it will continue wrapping and waiting for VSYNC
-        // This is safe because:
-        // 1. PIO wraps back to wait for VSYNC at start of frame
-        // 2. DMA is already complete and won't transfer any more data
-        // 3. New DMA will be configured before we re-enable for next frame
-        // 4. Disabling PIO mid-capture can cause state machine corruption
-        
-        // Mark frame as ready
-        video_frame_ready = true;
-    }
-
-    // Audio DMA
-    if (ints & (1u << audio_dma_chan)) {
-        dma_hw->ints1 = (1u << audio_dma_chan);
-        analog_dma_handler();
-    }
-}
