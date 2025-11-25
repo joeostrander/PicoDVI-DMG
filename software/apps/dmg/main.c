@@ -183,31 +183,35 @@ static uint8_t button_states_previous[BUTTON_COUNT];
 // Frame swapping synchronization - use atomic pointer swap
 volatile uint8_t* volatile framebuffer_display_ptr = NULL;
 
-// The frame is basically full width
-// - since horizontal is already doubled, I manually repeat each x2 to get 4x scale
-// - using DVI_VERTICAL_REPEAT to repeat vertically by 4
-#define FRAME_WIDTH 800
-#define FRAME_HEIGHT 150    // (x4 via DVI_VERTICAL_REPEAT)
+// With DVI_SYMBOLS_PER_WORD=2, buffer is HALF width (each pixel encoded creates 2 output pixels)
+// For 640x480 output with 3.5x scaling (560x432 game area - nearly fills screen!):
+// - Buffer: 320 pixels wide (FRAME_WIDTH / DVI_SYMBOLS_PER_WORD)
+// - Manually repeat each Game Boy pixel 1.75x in buffer → 280 pixels
+// - Hardware doubles → 560 output pixels (3.5x from original 160!)
+// - Vertical: 144 lines × 3 (DVI_VERTICAL_REPEAT) = 432 lines
+// NOTE: 1.75x repeat pattern: every 4 pixels become 7 (AAAABBBBCCCCDDDD → AAABBBBCCCDDD)
+#define FRAME_WIDTH 640
+#define FRAME_HEIGHT 160    // (x3 via DVI_VERTICAL_REPEAT = 480 lines)
 
-const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
+const struct dvi_timing __not_in_flash_func(dvi_timing_640x480p_60hz_252K) = {
 	.h_sync_polarity   = false,
-	.h_front_porch     = 44,
-	.h_sync_width      = 128,
-	.h_back_porch      = 88,
-	.h_active_pixels   = 800,
+	.h_front_porch     = 16,
+	.h_sync_width      = 96,
+	.h_back_porch      = 48,
+	.h_active_pixels   = 640,
 
 	.v_sync_polarity   = false,
-	.v_front_porch     = 2,        // increased from 1
-	.v_sync_width      = 4,
-	.v_back_porch      = 22,
-	.v_active_lines    = 600,
+	.v_front_porch     = 10,
+	.v_sync_width      = 2,
+	.v_back_porch      = 33,
+	.v_active_lines    = 480,
 
-	.bit_clk_khz       = 280000
+	.bit_clk_khz       = 252000
 };
 
 // #define VREG_VSEL VREG_VOLTAGE_1_25  // Increased from 1.20V for stable 280 MHz clocks
-#define VREG_VSEL VREG_VOLTAGE_1_20
-#define DVI_TIMING dvi_timing_800x600p_60hz_280K
+#define VREG_VSEL VREG_VOLTAGE_1_10  // 252 MHz is comfortable at lower voltage
+#define DVI_TIMING dvi_timing_640x480p_60hz_252K
 
 
 // // UART config on the last GPIOs
@@ -306,39 +310,56 @@ void core1_main(void)
 // static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
 {
-    // Note first two scanlines are pushed before DVI start
-    //static uint myscanline = 2;
     uint myscanline = scanline;
     uint idx = 0;
-    uint border_horz = 40;
-    uint border_vert = 3;
+    uint border_horz = 20;  // (320 - 280) / 2 = 20 pixels in buffer (×2 in HW = 40 output pixels each side)
+    uint border_vert = 8;   // (160 - 144) / 2 = 8 lines top and bottom (×3 repeat = 24 output lines)
     static uint frame_idx = 0;
     static uint dmg_line_idx = 0;
-    // TODO: calc array start from scanline...
-    // scanlines are 0 to 149 cuz frame height 150
-    if (myscanline < border_vert || myscanline >= FRAME_HEIGHT-border_vert)
+    
+    // scanlines are 0 to 159 (frame height 160, scaled 3x to 480)
+    if (myscanline < border_vert || myscanline >= FRAME_HEIGHT - border_vert)
     {
+        // Top or bottom border
         for (uint i = 0; i < sizeof(line_buffer); i++)
         {
             line_buffer[idx++] = background_color;
         }
         dmg_line_idx = 0;
     }
-    else    {
+    else 
+    {
         dmg_line_idx = myscanline - border_vert;
+        
+        // Left border
         for (uint i = 0; i < border_horz; i++)
             line_buffer[idx++] = background_color;
         
-        for (uint i = 0; i < DMG_PIXELS_X; i++)
+        // Game Boy pixels with 1.75x horizontal scaling (160 pixels → 280 in buffer → 560 output)
+        // Pattern: emit 7 pixels for every 4 Game Boy pixels (1.75 × 4 = 7)
+        // Distribution: A A B B C C D (two pixels get 2 copies, two get 1 copy, spreads evenly)
+        for (uint i = 0; i < DMG_PIXELS_X; i += 4)
         {
             frame_idx = dmg_line_idx * DMG_PIXELS_X + i;
-            // Read from atomic pointer - single load operation
             uint8_t* fb = (uint8_t*)framebuffer_display_ptr;
-            line_buffer[idx++] = game_palette[fb[frame_idx]];
-            line_buffer[idx++] = game_palette[fb[frame_idx]];
             
+            // Get 4 pixels (or remaining if less than 4)
+            uint8_t pixel1 = game_palette[fb[frame_idx]];
+            uint8_t pixel2 = (i + 1 < DMG_PIXELS_X) ? game_palette[fb[frame_idx + 1]] : pixel1;
+            uint8_t pixel3 = (i + 2 < DMG_PIXELS_X) ? game_palette[fb[frame_idx + 2]] : pixel2;
+            uint8_t pixel4 = (i + 3 < DMG_PIXELS_X) ? game_palette[fb[frame_idx + 3]] : pixel3;
+            
+            // Emit 7 pixels with pattern: A A B B C C D (spreads 1.75× evenly)
+            line_buffer[idx++] = pixel1;
+            line_buffer[idx++] = pixel1;
+            line_buffer[idx++] = pixel2;
+            line_buffer[idx++] = pixel2;
+            line_buffer[idx++] = pixel3;
+            line_buffer[idx++] = pixel3;
+            line_buffer[idx++] = pixel4;
         }
-
+        
+        // Right border
         for (uint i = 0; i < border_horz; i++)
             line_buffer[idx++] = background_color;
     }

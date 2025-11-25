@@ -15,7 +15,7 @@ target_compile_options(dmg PRIVATE -Wall)
 
 target_compile_definitions(dmg PRIVATE
     DVI_DEFAULT_SERIAL_CONFIG=${DVI_DEFAULT_SERIAL_CONFIG}
-    DVI_VERTICAL_REPEAT=4
+    DVI_VERTICAL_REPEAT=3
     DVI_SYMBOLS_PER_WORD=2
 )
 
