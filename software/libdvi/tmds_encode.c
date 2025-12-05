@@ -72,7 +72,7 @@ void __not_in_flash_func(tmds_encode_data_channel_16bpp)(const uint32_t *pixbuf,
 		tmds_encode_loop_16bpp_leftshift(pixbuf, symbuf, n_pix, require_lshift);
 	else
 		tmds_encode_loop_16bpp(pixbuf, symbuf, n_pix);
-	interp_restore(interp0_hw, &interp0_save);
+		interp_restore(interp0_hw, &interp0_save);
 }
 
 // As above, but 8 bits per pixel, multiple of 4 pixels, and still word-aligned.
@@ -302,4 +302,68 @@ void __not_in_flash_func(tmds_encode_palette_data)(const uint32_t *pixbuf, const
 	interp_restore(interp0_hw, &interp0_save);
 	interp_restore(interp1_hw, &interp1_save);
 #endif
+}
+
+// Optimized 2bpp packed grayscale encoder for Game Boy
+// Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
+// Output: grayscale TMDS symbols with 4× horizontal scaling (160→640 pixels)
+// With DVI_SYMBOLS_PER_WORD=2: 640 pixels = 320 words per channel
+// Each input pixel is replicated 4 times (4× scaling)
+void __not_in_flash_func(tmds_encode_2bpp_packed_grayscale)(
+    const uint8_t *packed_pixbuf,    // Input: 40 bytes (160 pixels packed)
+    uint32_t *symbuf_r,              // Output: Red channel TMDS symbols
+    uint32_t *symbuf_g,              // Output: Green channel TMDS symbols
+    uint32_t *symbuf_b,              // Output: Blue channel TMDS symbols
+    size_t output_words              // Number of output words per channel (640 pixels / 2 = 320 words)
+) {    // Grayscale TMDS symbol pairs (20-bit values, each containing 2×10-bit symbols for SPW=2)
+    // These are from tmds_table.h - using pre-balanced symbol pairs for grayscale values
+    // Game Boy color mapping: 0=white (lightest), 1=light gray, 2=dark gray, 3=black (darkest)
+    // Using table indices for ~255, ~170, ~85, ~0 brightness (6-bit input, so divide by 4)
+    static const uint32_t tmds_gray_pairs[4] = {
+        0xbfa01u,  // GB 0 = White (brightest)   - table index 63 (255>>2)
+        0xb3a31u,  // GB 1 = Light gray          - table index 42 (170>>2)  
+        0xa7a61u,  // GB 2 = Dark gray           - table index 21 (85>>2)
+        0x40dfcu   // GB 3 = Black (darkest)     - table index 1  (0>>2)
+    };
+
+    const uint8_t *src = packed_pixbuf;
+    size_t word_idx = 0;
+    
+    // Process each input byte (contains 4 packed pixels)
+    // Each pixel gets replicated 4× for horizontal scaling (160→640 pixels)
+    // Since each word contains 2 pixels (SPW=2), we output 2 words per input pixel
+    for (size_t byte_idx = 0; byte_idx < 40; byte_idx++) {
+        uint8_t packed_byte = src[byte_idx];
+        
+        // Extract and process each of the 4 pixels in this byte
+        for (int pixel_in_byte = 0; pixel_in_byte < 4; pixel_in_byte++) {
+            // Extract 2-bit pixel value (MSB first: bits 7-6, 5-4, 3-2, 1-0)
+            uint shift = (3 - pixel_in_byte) * 2;
+            uint8_t pixel_2bpp = (packed_byte >> shift) & 0x03;
+            
+            // Get TMDS symbol pair for this grayscale level
+            // The table entry already contains TWO identical symbols packed together
+            uint32_t word = tmds_gray_pairs[pixel_2bpp];
+            
+            // Replicate this pixel 4× by writing the same word twice
+            // Each word contains 2 pixels, so 2 words = 4 pixels total
+            symbuf_r[word_idx] = word;
+            symbuf_g[word_idx] = word;
+            symbuf_b[word_idx] = word;
+            word_idx++;
+            
+            symbuf_r[word_idx] = word;
+            symbuf_g[word_idx] = word;
+            symbuf_b[word_idx] = word;
+            word_idx++;
+        }
+    }
+    
+    // Fill any remaining output with black (if output_words > 320)
+    while (word_idx < output_words) {
+        symbuf_r[word_idx] = tmds_gray_pairs[3];
+        symbuf_g[word_idx] = tmds_gray_pairs[3];
+        symbuf_b[word_idx] = tmds_gray_pairs[3];
+        word_idx++;
+    }
 }

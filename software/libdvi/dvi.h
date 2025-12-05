@@ -100,6 +100,7 @@ void dvi_wait_for_valid_line(struct dvi_inst *inst);
 // TMDS encode it, and pass it to the tmds valid queue.
 void dvi_scanbuf_main_8bpp(struct dvi_inst *inst);
 void dvi_scanbuf_main_16bpp(struct dvi_inst *inst);
+void dvi_scanbuf_main_2bpp(struct dvi_inst *inst);  // Optimized 2bpp packed (SPW=2, 2× scaling)
 
 // Same as above, but each q_colour_valid entry is a framebuffer
 void dvi_framebuf_main_8bpp(struct dvi_inst *inst);

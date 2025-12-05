@@ -39,7 +39,6 @@ pico_enable_stdio_uart(dmg 0)
 # Build pio programs
 pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/video_capture.pio)
 pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/dmg_buttons.pio)
-pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/dmg_buttons_simple.pio)
 
 
 # create map/bin/hex file etc.

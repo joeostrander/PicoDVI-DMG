@@ -1,6 +1,8 @@
 #include <stdlib.h>
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+#include "hardware/gpio.h"
+#include "pico/time.h"
 
 #include "dvi.h"
 #include "dvi_timing.h"
@@ -171,10 +173,33 @@ static inline void __dvi_func_x(_dvi_prepare_scanline_8bpp)(struct dvi_inst *ins
     queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
     uint pixwidth = inst->timing->h_active_pixels;
     uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;
-    // Scanline buffers are half-resolution; the functions take the number of *input* pixels as parameter.
-    tmds_encode_data_channel_8bpp(scanbuf, tmdsbuf + 0 * words_per_channel, pixwidth / 2, DVI_8BPP_BLUE_MSB,  DVI_8BPP_BLUE_LSB );
-    tmds_encode_data_channel_8bpp(scanbuf, tmdsbuf + 1 * words_per_channel, pixwidth / 2, DVI_8BPP_GREEN_MSB, DVI_8BPP_GREEN_LSB);
-    tmds_encode_data_channel_8bpp(scanbuf, tmdsbuf + 2 * words_per_channel, pixwidth / 2, DVI_8BPP_RED_MSB,   DVI_8BPP_RED_LSB  );
+    // Scanline buffers are reduced by DVI_SYMBOLS_PER_WORD factor; the functions take the number of *input* pixels as parameter.
+    tmds_encode_data_channel_8bpp(scanbuf, tmdsbuf + 0 * words_per_channel, pixwidth / DVI_SYMBOLS_PER_WORD, DVI_8BPP_BLUE_MSB,  DVI_8BPP_BLUE_LSB );
+    tmds_encode_data_channel_8bpp(scanbuf, tmdsbuf + 1 * words_per_channel, pixwidth / DVI_SYMBOLS_PER_WORD, DVI_8BPP_GREEN_MSB, DVI_8BPP_GREEN_LSB);
+    tmds_encode_data_channel_8bpp(scanbuf, tmdsbuf + 2 * words_per_channel, pixwidth / DVI_SYMBOLS_PER_WORD, DVI_8BPP_RED_MSB,   DVI_8BPP_RED_LSB  );
+    queue_add_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
+}
+
+// Optimized 2bpp packed grayscale encoder for Game Boy (SPW=2, 4× horizontal scaling)
+// Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
+// Output: 640 pixels (160 × 4 in encoder)
+static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp)(struct dvi_inst *inst, const uint8_t *packed_scanbuf) {
+    uint32_t *tmdsbuf = NULL;
+    queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
+    uint pixwidth = inst->timing->h_active_pixels;  // 640
+    uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;  // 640/2 = 320 words
+    
+    // Call the optimized 2bpp packed encoder with 4× horizontal scaling
+    // Input: 40 bytes (160 pixels packed) → Output: 320 words (640 pixels with 4× scaling)
+    // We pass words_per_channel so it fills the entire scanline (pads with black if needed)
+    tmds_encode_2bpp_packed_grayscale(
+        packed_scanbuf,
+        tmdsbuf + 0 * words_per_channel,  // Blue channel
+        tmdsbuf + 1 * words_per_channel,  // Green channel  
+        tmdsbuf + 2 * words_per_channel,  // Red channel
+        words_per_channel  // Fill entire scanline (320 words = 640 pixels with SPW=2)
+    );
+    
     queue_add_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
 }
 
@@ -198,6 +223,18 @@ void __dvi_func(dvi_scanbuf_main_8bpp)(struct dvi_inst *inst) {
         queue_remove_blocking_u32(&inst->q_colour_valid, &scanbuf);
         _dvi_prepare_scanline_8bpp(inst, scanbuf);
         queue_add_blocking_u32(&inst->q_colour_free, &scanbuf);
+    }
+    __builtin_unreachable();
+}
+
+// Optimized 2bpp packed grayscale (SPW=2, 2× horizontal scaling)
+// This is the most efficient version - direct packed 2bpp to TMDS encoding!
+void __dvi_func(dvi_scanbuf_main_2bpp)(struct dvi_inst *inst) {
+    while (1) {
+        const uint8_t *scanbuf = NULL;
+        queue_remove_blocking_u32(&inst->q_colour_valid, (uint32_t*)&scanbuf);
+        _dvi_prepare_scanline_2bpp(inst, scanbuf);
+        queue_add_blocking_u32(&inst->q_colour_free, (uint32_t*)&scanbuf);
     }
     __builtin_unreachable();
 }
