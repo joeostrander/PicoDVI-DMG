@@ -20,6 +20,11 @@ void tmds_encode_2bpp(const uint32_t *pixbuf, uint32_t *symbuf, size_t n_pix);
 // Optimized 2bpp packed grayscale encoder with 2× scaling (from tmds_encode.c)
 void tmds_encode_2bpp_packed_grayscale(const uint8_t *packed_pixbuf, uint32_t *symbuf_r, uint32_t *symbuf_g, uint32_t *symbuf_b, size_t output_words);
 
+void tmds_encode_2bpp_packed_gbp_color(const uint8_t *packed_pixbuf, uint32_t *symbuf_r, uint32_t *symbuf_g, uint32_t *symbuf_b, size_t output_words);
+
+// Flexible 2bpp packed encoder with runtime RGB888 palette support (5× scaling for 800x600)
+void tmds_encode_2bpp_packed_palette(const uint8_t *packed_pixbuf, uint32_t *symbuf_r, uint32_t *symbuf_g, uint32_t *symbuf_b, size_t output_words, const uint32_t *palette_rgb888);
+
 // Uses interp0:
 void tmds_encode_loop_16bpp(const uint32_t *pixbuf, uint32_t *symbuf, size_t n_pix);
 void tmds_encode_loop_16bpp_leftshift(const uint32_t *pixbuf, uint32_t *symbuf, size_t n_pix, uint leftshift);

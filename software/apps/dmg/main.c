@@ -2,10 +2,7 @@
 
 TODO:
 
-    fix vsync issue?
-
-
-    Get HDMI (DVI) working on real TV?
+    Get HDMI (DVI) working on real TV - works in 640x480
     Possibly pull in some of the OSD features from PicoDVI-N64
     cleanup unused headers
     Add my version of OSD back in
@@ -52,6 +49,8 @@ TODO:
 #include "analog_microphone.h"
 #include "emusound.h"
 
+#include "colors.h"
+
 // ===== VIDEO CAPTURE MODE SELECTION =====
 // Toggle between two VSYNC synchronization methods:
 //   1 = IRQ-based (GPIO interrupt on VSYNC rising edge - precise, no PIO wait)
@@ -62,18 +61,18 @@ TODO:
 #include "video_capture.pio.h"  // PIO-based video capture
 #include "shared_dma_handler.h"
 
-#define ENABLE_AUDIO 1  // Set to 1 to enable audio, 0 to disable all audio code
-#define ENABLE_PIO_DMG_BUTTONS 0  // Set to 1 to enable DMG PIO controller, 0 to disable
-#define ENABLE_CPU_DMG_BUTTONS 1  // Set to 1 to enable DMG CPU sending of buttons, 0 to disable
-#define ENABLE_VIDEO_CAPTURE 1
-#define ENABLE_OSD 0  // Set to 1 to enable OSD code, 0 to disable (TODO)
+#define ENABLE_AUDIO                1  // Set to 1 to enable audio, 0 to disable all audio code
+#define ENABLE_PIO_DMG_BUTTONS      0  // Set to 1 to enable DMG PIO controller, 0 to disable
+#define ENABLE_CPU_DMG_BUTTONS      1  // Set to 1 to enable DMG CPU sending of buttons, 0 to disable
+#define ENABLE_VIDEO_CAPTURE        1
+#define ENABLE_OSD                  0  // Set to 1 to enable OSD code, 0 to disable (TODO)
 
 
 #if ENABLE_AUDIO
 static const int hdmi_n[6] = {4096, 6272, 6144, 3136, 4096, 6144};  // 32k, 44.1k, 48k, 22.05k, 16k, 24k
-static uint16_t  rate = SAMPLE_FREQ;
+static uint16_t rate = SAMPLE_FREQ;
 // #define AUDIO_BUFFER_SIZE   (0x1<<8) // Must be power of 2
-audio_sample_t      audio_buffer[AUDIO_BUFFER_SIZE];
+audio_sample_t audio_buffer[AUDIO_BUFFER_SIZE];
 #endif
 
 #define DEBUG_BUTTON_PRESS   // Illuminate LED on button presses
@@ -113,13 +112,16 @@ i2c_inst_t* i2cHandle = i2c1;
 
 // Packed DMA buffers - 4 pixels per byte (2 bits each)
 // This is the native format from the Game Boy (2 bits per pixel)
+// Used by BOTH 640x480 and 800x600 modes for DMA capture AND display
 #define PACKED_FRAME_SIZE (DMG_PIXEL_COUNT / 4)  // 5760 bytes (160×144 ÷ 4)
 static uint8_t packed_buffer_0[PACKED_FRAME_SIZE] = {0};
 static uint8_t packed_buffer_1[PACKED_FRAME_SIZE] = {0};
 static uint8_t packed_buffer_previous[PACKED_FRAME_SIZE] = {0};  // For frame blending
 
-// Pointer to packed buffer being displayed (swapped atomically)
-// Core 1 reads from this, Core 0 writes to the other buffer
+// Both modes now use packed buffers directly!
+// TMDS encoder handles palette conversion and horizontal scaling
+// - 640x480: 4× scaling with grayscale/color palette
+// - 800x600: 5× scaling with RGB888 palette
 static volatile uint8_t* packed_display_ptr = NULL;
 
 // Frame blending - blends previous frame with current for sprite overlay effects
@@ -130,10 +132,6 @@ static volatile bool frameblending_enabled = false;
 // Tables are computed at initialization
 static uint8_t blend_lut[256][256];       // Blended output
 static uint8_t store_lut[256];             // What to store for next frame
-
-// Flag to signal frame capture needed (unused currently)
-static volatile bool frame_capture_needed = false;
-
 
 
 typedef enum
@@ -180,30 +178,35 @@ static uint video_offset = 0;
 static uint8_t button_states[BUTTON_COUNT];
 static uint8_t button_states_previous[BUTTON_COUNT];
 
+#if RESOLUTION_800x600
+#define FRAME_WIDTH 800
+#define FRAME_HEIGHT 150    // (x4 via DVI_VERTICAL_REPEAT)
+
+const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
+	.h_sync_polarity   = false,
+	.h_front_porch     = 44,
+	.h_sync_width      = 128,
+	.h_back_porch      = 88,
+	.h_active_pixels   = 800,
+
+	.v_sync_polarity   = false,
+	.v_front_porch     = 2,        // increased from 1
+	.v_sync_width      = 4,
+	.v_back_porch      = 22,
+	.v_active_lines    = 600,
+
+	.bit_clk_khz       = 280000
+};
+
+#define VREG_VSEL VREG_VOLTAGE_1_20
+#define DVI_TIMING dvi_timing_800x600p_60hz_280K
+#else   // 640x480
 #define FRAME_WIDTH 640
 #define FRAME_HEIGHT 160    // (×3 via DVI_VERTICAL_REPEAT = 480 lines)
 
-// const struct dvi_timing __not_in_flash_func(dvi_timing_640x480p_60hz_252K) = {
-// 	.h_sync_polarity   = false,
-// 	.h_front_porch     = 16,
-// 	.h_sync_width      = 96,
-// 	.h_back_porch      = 48,
-// 	.h_active_pixels   = 640,
-
-// 	.v_sync_polarity   = false,
-// 	.v_front_porch     = 10,
-// 	.v_sync_width      = 2,
-// 	.v_back_porch      = 33,
-// 	.v_active_lines    = 480,
-
-// 	.bit_clk_khz       = 252000
-// };
-
-// #define VREG_VSEL VREG_VOLTAGE_1_25  // Increased from 1.20V for stable 280 MHz clocks
 #define VREG_VSEL VREG_VOLTAGE_1_10  // 252 MHz is comfortable at lower voltage
-// #define DVI_TIMING dvi_timing_640x480p_60hz_252K
 #define DVI_TIMING dvi_timing_640x480p_60hz
-
+#endif
 
 // // UART config on the last GPIOs
 // #define UART_TX_PIN (28)
@@ -222,13 +225,40 @@ static uint8_t button_states_previous[BUTTON_COUNT];
 
 struct dvi_inst dvi0;
 
+#if RESOLUTION_800x600
+// For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
+// - Buffer contains packed 2bpp data (4 pixels per byte)
+// - 160 pixels = 40 bytes per scanline
+// - The TMDS encoder handles 5× horizontal scaling (160→800 pixels) with RGB888 palette
+uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
+
+// RGB888 palettes for 800x600 mode (used by TMDS encoder)
+const uint32_t palette__dmg_nso[4] = {
+    0x8cad28,  // GB 0 = White (DMG green lightest)
+    0x6c9421,  // GB 1 = Light gray
+    0x426b29,  // GB 2 = Dark gray
+    0x214231   // GB 3 = Black (DMG green darkest)
+};
+
+const uint32_t palette__gbp_nso[4] = {
+    0xb5c69c,  // GB 0 = White (GBP lightest)
+    0x8d9c7b,  // GB 1 = Light gray
+    0x6c7251,  // GB 2 = Dark gray
+    0x303820   // GB 3 = Black (GBP darkest)
+};
+
+const uint32_t* game_palette_rgb888 = palette__gbp_nso;
+
+static void set_game_palette(int index);
+
+#else // 640x480
 // For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
 // - Buffer contains packed 2bpp data (4 pixels per byte)
 // - 160 pixels = 40 bytes per scanline
 // - The TMDS encoder handles 4× horizontal scaling (160→640 pixels)
 // - No hardware doubling needed - encoder outputs full 640 pixels!
 uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
-
+#endif // RESOLUTION
 
 #if ENABLE_AUDIO
 // configuration
@@ -277,37 +307,45 @@ void core1_main(void)
 {
     dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
     dvi_start(&dvi0);
-    dvi_scanbuf_main_2bpp(&dvi0);  // Use optimized 2bpp packed encoder!
+#if RESOLUTION_800x600
+    dvi_scanbuf_main_2bpp_palette(&dvi0);  // Use 2bpp packed with RGB888 palette (5× scaling)
+#else // 640x480
+    dvi_scanbuf_main_2bpp(&dvi0);  // Use optimized 2bpp packed encoder (4× scaling)
+#endif // RESOLUTION
 
     __builtin_unreachable();
 }
 
-// void core1_scanline_callback(void)
-// static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
+#if RESOLUTION_800x600
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
 {
-    uint myscanline = scanline;
-    
     static uint dmg_line_idx = 0;
     
-    // scanlines are 0 to 143 (Game Boy native resolution, scaled 3× vertically to 432)
-    if (myscanline >= DMG_PIXELS_Y)
+    // scanlines are 0 to 143 (Game Boy native resolution, scaled 4× vertically to 576)
+    // Plus vertical borders to reach 600 lines
+    // 144 lines x 4 = 576 game area lines
+    // 600 / 4 = 150 total scanlines
+    // we've got 6 extra lines, so center vertically by starting at line 3
+    // I believe the first two scanlines are pushed before DVI start, so offset = 1
+    int offset = 1;
+    if ((scanline < offset) || (scanline >= (DMG_PIXELS_Y+offset)))
     {
         // Beyond game area - fill with black (all bits set = 0xFF for each pixel pair)
-        // In 2bpp packed format: 0xFF = all pixels are value 3 (black)
+        // In 2bpp packed format: 0xFF = all pixels are value 3 (black/darkest color in palette)
         memset(line_buffer, 0xFF, sizeof(line_buffer));
         dmg_line_idx = 0;
     }
     else 
     {
-        dmg_line_idx = myscanline;
+        dmg_line_idx = scanline - offset;
         
         const uint8_t* packed_fb = (const uint8_t*)packed_display_ptr;
         if (packed_fb != NULL) {
             const uint8_t* packed_line = packed_fb + (dmg_line_idx * DMG_PIXELS_X / 4);  // 40 bytes per line
             
             // Simply copy the packed 2bpp data directly!
-            // No unpacking, no palette lookup, no scaling - the TMDS encoder handles everything
+            // No unpacking, no palette lookup - the TMDS encoder handles everything
+            // Encoder will apply RGB888 palette and 5× horizontal scaling (160→800 pixels)
             memcpy(line_buffer, packed_line, sizeof(line_buffer));  // Copy 40 bytes
         } else {
             // No frame yet, fill with black
@@ -320,16 +358,49 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline
     
     while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
     ;
-    if (++myscanline >= FRAME_HEIGHT) {
-        myscanline = 0;
-    }
 }
+#else // 640x480
+static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
+{
+    static uint dmg_line_idx = 0;
+    
+    // scanlines are 0 to 143 (Game Boy native resolution, scaled 3× vertically to 432)
+    if (scanline >= DMG_PIXELS_Y)
+    {
+        // Beyond game area - fill with black (all bits set = 0xFF for each pixel pair)
+        // In 2bpp packed format: 0xFF = all pixels are value 3 (black)
+        memset(line_buffer, 0xFF, sizeof(line_buffer));
+        dmg_line_idx = 0;
+    }
+    else 
+    {
+        dmg_line_idx = scanline;
+        
+        const uint8_t* packed_fb = (const uint8_t*)packed_display_ptr;
+        if (packed_fb != NULL) {
+            const uint8_t* packed_line = packed_fb + (dmg_line_idx * DMG_PIXELS_X / 4);  // 40 bytes per line
+            
+            // Simply copy the packed 2bpp data directly!
+            // No unpacking, no palette lookup, no scaling - the TMDS encoder handles everything
+            memcpy(line_buffer, packed_line, sizeof(line_buffer));  // Copy 40 bytes
+        } else {
+            // No frame yet, fill with black
+            memset(line_buffer, 0xFF, sizeof(line_buffer));
+        }
+    }    const uint32_t *bufptr = (uint32_t*)line_buffer;
+    queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
+    
+    while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
+    ;
+}
+#endif // RESOLUTION
 
 // Initialize frame blending lookup tables for ultra-fast processing
 // Called once at startup to precompute all 256×256 byte combinations
 // This implements the exact logic from old_code.c:
 //   Blend: new_value == 0 ? new_value|*pixel_old : new_value
 //   Store: new_value > 0 ? 2 : 0  (brightens ghosts by storing gray)
+// Used by BOTH 640x480 and 800x600 modes
 static void init_frame_blending_luts(void) {
     // Build the store_lut first (what to save for next frame's ghost)
     // This implements: *pixel_old++ = new_value > 0 ? 2 : 0;
@@ -376,8 +447,9 @@ int main(void)
     }    // Initialize stdio for USB serial debugging
     stdio_init_all();
     sleep_ms(3000);  // Give USB more time to enumerate
-    
+
     // Initialize frame blending lookup tables (one-time computation)
+    // Both modes use packed buffers for capture, so both need LUTs
     init_frame_blending_luts();
     
     // Force flush and try multiple times
@@ -385,15 +457,12 @@ int main(void)
         printf("\n\n=== PicoDVI-DMG Starting (attempt %d) ===\n", i+1);
         stdio_flush();
         sleep_ms(100);
-    }    vreg_set_voltage(VREG_VSEL);
-    sleep_ms(10);
-    set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
-
-    // Initialize packed display pointer with mario image
-    // Note: mario_lut_160x144 is 8bpp, we need to convert it to 2bpp packed format
-    packed_display_ptr = packed_buffer_0;
+    }
     
-    // Convert mario image from 8bpp to 2bpp packed
+    vreg_set_voltage(VREG_VSEL);
+    sleep_ms(10);    
+    set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);    // Convert mario image from 8bpp to 2bpp packed format
+    // Both modes capture in packed format from Game Boy
     for (int i = 0; i < DMG_PIXEL_COUNT; i += 4) {
         uint8_t p0 = mario_lut_160x144[i + 0] & 0x03;
         uint8_t p1 = mario_lut_160x144[i + 1] & 0x03;
@@ -403,6 +472,9 @@ int main(void)
     }
     memcpy(packed_buffer_1, packed_buffer_0, PACKED_FRAME_SIZE);
 
+    // Both modes use packed buffer directly (TMDS encoder handles palette and scaling)
+    packed_display_ptr = packed_buffer_0;
+
     // setup_default_uart();
     // stdio_uart_init_full(UART_ID, BAUD_RATE, UART_TX_PIN, UART_RX_PIN);
 
@@ -411,6 +483,10 @@ int main(void)
     //dvi0.scanline_callback = (dvi_callback_t*)core1_scanline_callback;
     dvi0.scanline_callback = core1_scanline_callback;
     dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
+
+#if RESOLUTION_800x600
+    set_game_palette(SCHEME_SGB_4H);
+#endif
 
     uint32_t *bufptr = (uint32_t*)line_buffer;
     queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
@@ -444,6 +520,13 @@ int main(void)
     increase_write_pointer(&dvi0.audio_ring, AUDIO_BUFFER_SIZE / 4);
     printf("Audio buffer pre-filled to %d samples (25%%)\n", AUDIO_BUFFER_SIZE / 4);
 #endif
+
+    // OPTIMIZED ORDER for audio + video:
+    // 1. Start audio timer (500Hz chunk processing)
+    // 2. Start Core1 (DVI output starts consuming audio)
+    // 3. Initialize ADC microphone
+    // 4. Initialize GPIO/PIO for DMG controller
+    // 5. Register VSYNC interrupt (video capture begins)
 
 #if ENABLE_AUDIO
     printf("Starting audio timer (500Hz chunk rate)...\n");
@@ -493,7 +576,7 @@ int main(void)
     gpio_set_irq_enabled_with_callback(DMG_READING_DPAD_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
     gpio_set_irq_enabled(DMG_READING_BUTTONS_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);  // Callback already registered
 #endif // ENABLE_CPU_DMG_BUTTONS
-    
+
 #if ENABLE_VIDEO_CAPTURE
 #if USE_VSYNC_IRQ
     // IRQ MODE: Enable VSYNC interrupt (GPIO 4) - must be done AFTER callback is registered above
@@ -527,20 +610,19 @@ int main(void)
         while (1) { tight_loop_contents(); }
     }
     
-    printf("  -> DMA initialized (packed format: %d bytes)\n", PACKED_FRAME_SIZE);
-    stdio_flush();
+    printf("  -> DMA initialized (packed format: %d bytes)\n", PACKED_FRAME_SIZE);    stdio_flush();
 #endif
 
-    // Track which packed buffer is being captured
+    // Track which packed buffer is being captured (both modes use packed buffers)
     uint8_t* packed_capture = packed_buffer_0;
     uint8_t* packed_next = packed_buffer_1;
-    bool video_capture_active = false;    // Main loop
+    bool video_capture_active = false;
+    
+    // Main loop - PIO video + good audio
     while (true) 
     {
         static uint32_t loop_counter = 0;
         static uint32_t frames_captured = 0;
-        static uint32_t last_debug_time = 0;
-        
 #if ENABLE_VIDEO_CAPTURE
         // Start video capture after another 3 seconds in the loop (total ~10 sec from boot)
         if (!video_capture_active && loop_counter > 3000000) {
@@ -550,23 +632,12 @@ int main(void)
             printf("Returned from video_capture_start_frame()\n");
             printf("Waiting for VSYNC from Game Boy...\n");
             video_capture_active = true;
-        }
-        
-        // Debug output every 2 seconds when waiting for first frame
-        if (video_capture_active && frames_captured == 0) {
-            uint32_t now = time_us_32() / 1000000;  // Convert to seconds
-            if (now != last_debug_time) {
-                last_debug_time = now;
-                printf("Waiting... VSYNC IRQs: %lu, frames captured: %lu\n", 
-                       video_capture_get_vsync_count(), frames_captured);
-            }
-        }
-        
+        }        
         // Check if video frame is ready (non-blocking)
         if (video_capture_active && video_capture_frame_ready()) {
-            // Frame complete! Get the packed buffer (already in 2bpp format from PIO)
+            // Frame complete! Get the packed buffer (2bpp DMA format)
             uint8_t* completed_packed = video_capture_get_frame();
-              // Apply frame blending if enabled
+              // Apply frame blending if enabled (works on packed 2bpp data)
             if (frameblending_enabled) {
                 // Ultra-fast frame blending using precomputed lookup tables
                 // Logic from old_code.c:
@@ -586,34 +657,39 @@ int main(void)
                     packed_buffer_previous[i] = store_lut[current];
                 }
             }
-            
+
+            // Both modes use packed buffer directly (TMDS encoder handles palette and scaling)
             // CRITICAL: Use memory barrier and atomic swap to prevent race conditions
             // Ensure all DMA writes are visible before swapping
             __dmb(); // Data Memory Barrier
             
             // Atomic pointer swap - Core 1 will see this as a single operation
-            // No unpacking needed! Use the packed buffer directly
+            // No unpacking needed! TMDS encoder handles everything:
+            // - 640x480: 4× scaling with grayscale/GBP color palette
+            // - 800x600: 5× scaling with RGB888 palette
             packed_display_ptr = (volatile uint8_t*)completed_packed;
             
             // Another barrier to ensure the pointer write is visible
             __dmb();
-            
+
             // Swap packed buffers for next DMA capture
             uint8_t* temp = packed_capture;
             packed_capture = packed_next;
             packed_next = temp;
-              // DMA is already finished (that's why we're here), no need to wait
+            
+            // DMA is already finished (that's why we're here), no need to wait
             // Start capturing next frame immediately
             video_capture_start_frame(pio_video, video_sm, packed_capture, PACKED_FRAME_SIZE);
             frames_captured++;
         }
-#endif
-        
+#endif // ENABLE_VIDEO_CAPTURE
+
         loop_counter++;
         
-        // Check for frame blending toggle (SELECT + HOME)
+        // Check for frame blending toggle (SELECT + HOME) - works for both modes
         static button_state_t last_home = BUTTON_STATE_UNPRESSED;
-        static button_state_t last_select = BUTTON_STATE_UNPRESSED;
+        static button_state_t last_left = BUTTON_STATE_UNPRESSED;
+        static button_state_t last_right = BUTTON_STATE_UNPRESSED;
         
         if (button_states[BUTTON_SELECT] == BUTTON_STATE_PRESSED)
         {
@@ -627,11 +703,34 @@ int main(void)
                     memset(packed_buffer_previous, 0x00, PACKED_FRAME_SIZE);  // 0x00 = all white pixels
                 }
             }
+
+            if ((button_states[BUTTON_LEFT] == BUTTON_STATE_UNPRESSED)
+                && (last_left == BUTTON_STATE_PRESSED))
+            {
+                int index = get_scheme_index();
+                index--;
+                if (index < 0)
+                    index = NUMBER_OF_SCHEMES - 1;
+
+                set_game_palette(index);
+            }
+
+            if ((button_states[BUTTON_RIGHT] == BUTTON_STATE_UNPRESSED)
+                && (last_right == BUTTON_STATE_PRESSED))
+            {
+                int index = get_scheme_index();
+                index++;
+                if (index >= NUMBER_OF_SCHEMES)
+                    index = 0;
+
+                set_game_palette(index);
+            }
+
         }
         last_home = button_states[BUTTON_HOME];
-        last_select = button_states[BUTTON_SELECT];
-        
-        
+        last_left = button_states[BUTTON_LEFT];
+        last_right = button_states[BUTTON_RIGHT];
+
         // Poll controller occasionally
 #if ENABLE_PIO_DMG_BUTTONS
         (void)nes_classic_controller();
@@ -933,3 +1032,17 @@ static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t eve
     }
 }
 #endif // ENABLE_CPU_DMG_BUTTONS
+
+#if RESOLUTION_800x600
+static void set_game_palette(int index)
+{
+    if ((index <0) || index >= NUMBER_OF_SCHEMES)
+        return;
+
+    set_scheme_index(index);
+    game_palette_rgb888 = (uint32_t*)get_scheme();
+
+    // Set RGB888 palette pointer for 2bpp palette mode
+    dvi_get_blank_settings(&dvi0)->palette_rgb888 = game_palette_rgb888;
+}
+#endif // RESOLUTION

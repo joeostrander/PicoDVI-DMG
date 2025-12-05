@@ -193,10 +193,10 @@ const struct dvi_timing __dvi_const(dvi_timing_1600x900p_reduced_30hz) = {
 // Each symbol appears twice, concatenated in one word. Note these must be in
 // RAM because they see a lot of DMA traffic
 const uint32_t __dvi_const(dvi_ctrl_syms)[4] = {
-	0xd5354,  // VSYNC=0, HSYNC=0
-	0x2acab,  // VSYNC=0, HSYNC=1
-	0x55154,  // VSYNC=1, HSYNC=0
-	0xaaeab   // VSYNC=1, HSYNC=1
+	0xd5354,
+	0x2acab,
+	0x55154,
+	0xaaeab
 };
 
 // Output solid red scanline if we are given NULL for tmdsbuff

@@ -6,17 +6,29 @@ add_executable(dmg
     main.c
     analog_microphone.c
     emusound.c
-		shared_dma_handler.c
+    shared_dma_handler.c
+    colors.c
 )
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 target_compile_options(dmg PRIVATE -Wall)
 
+# Set resolution mode (change this to switch between modes)
+set(RESOLUTION_800x600 1)  # Set to 1 for 800x600, 0 for 640x480
+
+# Automatically set DVI_VERTICAL_REPEAT based on resolution
+if(RESOLUTION_800x600)
+    set(DVI_VERTICAL_REPEAT_VALUE 4)
+else()
+    set(DVI_VERTICAL_REPEAT_VALUE 3)
+endif()
+
 target_compile_definitions(dmg PRIVATE
     DVI_DEFAULT_SERIAL_CONFIG=${DVI_DEFAULT_SERIAL_CONFIG}
-    DVI_VERTICAL_REPEAT=3
+    DVI_VERTICAL_REPEAT=${DVI_VERTICAL_REPEAT_VALUE}
     DVI_SYMBOLS_PER_WORD=2
+    RESOLUTION_800x600=${RESOLUTION_800x600}
 )
 
 target_link_libraries(dmg

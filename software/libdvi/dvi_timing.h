@@ -58,6 +58,7 @@ typedef struct dvi_blank {
     int right;
     int top;
     int bottom;
+    const uint32_t *palette_rgb888;  // Pointer to 4-color RGB888 palette for 2bpp mode (borrowed field)
 } dvi_blank_t;
 
 struct dvi_timing_state {

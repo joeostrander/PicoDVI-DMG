@@ -199,7 +199,43 @@ static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp)(struct dvi_inst *ins
         tmdsbuf + 2 * words_per_channel,  // Red channel
         words_per_channel  // Fill entire scanline (320 words = 640 pixels with SPW=2)
     );
+      queue_add_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
+}
+
+// 2bpp packed encoder with RGB888 palette support for 800x600 mode (SPW=2, 5× horizontal scaling)
+// Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
+// Output: 800 pixels (160 × 5 in encoder)
+// Palette pointer is stored in inst->blank_settings.palette_rgb888
+static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp_palette)(struct dvi_inst *inst, const uint8_t *packed_scanbuf) {
+    uint32_t *tmdsbuf = NULL;
+    queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
+    uint pixwidth = inst->timing->h_active_pixels;  // 800
+    uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;  // 800/2 = 400 words
     
+    // Get palette from inst (stored in borrowed field)
+    // Default palette if none set
+    static const uint32_t default_palette[4] = {
+        0xb5c69c,  // GB 0 = White
+        0x8d9c7b,  // GB 1 = Light gray
+        0x6c7251,  // GB 2 = Dark gray
+        0x303820   // GB 3 = Black
+    };
+    const uint32_t *palette = (const uint32_t*)inst->blank_settings.palette_rgb888;
+    if (palette == NULL) {
+        palette = default_palette;
+    }
+    
+    // Call the optimized 2bpp packed encoder with 5× horizontal scaling and palette
+    // Input: 40 bytes (160 pixels packed) → Output: 400 words (800 pixels with 5× scaling)
+    tmds_encode_2bpp_packed_palette(
+        packed_scanbuf,
+        tmdsbuf + 2 * words_per_channel,  // Red channel
+        tmdsbuf + 1 * words_per_channel,  // Green channel  
+        tmdsbuf + 0 * words_per_channel,  // Blue channel
+        words_per_channel,  // Fill entire scanline (400 words = 800 pixels with SPW=2)
+        palette  // RGB888 palette (4 colors)
+    );
+
     queue_add_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
 }
 
@@ -234,6 +270,17 @@ void __dvi_func(dvi_scanbuf_main_2bpp)(struct dvi_inst *inst) {
         const uint8_t *scanbuf = NULL;
         queue_remove_blocking_u32(&inst->q_colour_valid, (uint32_t*)&scanbuf);
         _dvi_prepare_scanline_2bpp(inst, scanbuf);
+        queue_add_blocking_u32(&inst->q_colour_free, (uint32_t*)&scanbuf);
+    }
+    __builtin_unreachable();
+}
+
+// 2bpp packed with RGB888 palette support for 800x600 mode
+void __dvi_func(dvi_scanbuf_main_2bpp_palette)(struct dvi_inst *inst) {
+    while (1) {
+        const uint8_t *scanbuf = NULL;
+        queue_remove_blocking_u32(&inst->q_colour_valid, (uint32_t*)&scanbuf);
+        _dvi_prepare_scanline_2bpp_palette(inst, scanbuf);
         queue_add_blocking_u32(&inst->q_colour_free, (uint32_t*)&scanbuf);
     }
     __builtin_unreachable();
