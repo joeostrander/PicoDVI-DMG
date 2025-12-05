@@ -3,7 +3,14 @@
 ## This project allows Gameboy DMG DVI output via HDMI using PicoDVI
 
 --- 
-Update 2025.11.24 - Audio is now working! 
+Update 2025.12.05
+ - 2 resolution options available (see CMakeLists.txt) 
+ - Selectable schemes with Select+left/right
+ - Frameblending with Select+Home
+ - PIO-based video capture
+
+Update 2025.11.24
+ - Audio is now working! 
 
 ---
 
@@ -41,7 +48,6 @@ You need to have the Pico SDK installed, as well as a recent CMake and arm-none-
 ```bash
 mkdir build
 cd build
-# cmake -DPICO_SDK_PATH=/path/to/sdk -DPICO_PLATFORM=rp2350 -DPICO_COPY_TO_RAM=1 ..
 cmake -DPICO_SDK_PATH=/path/to/sdk -DPICO_PLATFORM=rp2040 -DPICO_COPY_TO_RAM=1 ..
 make -j$(nproc)
 ```
