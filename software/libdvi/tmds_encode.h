@@ -17,11 +17,8 @@ void tmds_encode_palette_data(const uint32_t *pixbuf, const uint32_t *tmds_palet
 void tmds_encode_1bpp(const uint32_t *pixbuf, uint32_t *symbuf, size_t n_pix);
 void tmds_encode_2bpp(const uint32_t *pixbuf, uint32_t *symbuf, size_t n_pix);
 
-// Optimized 2bpp packed encoder for 640x480 (4× scaling, optional palette, no borders)
-void tmds_encode_2bpp_packed_640x480(const uint8_t *packed_pixbuf, uint32_t *symbuf_r, uint32_t *symbuf_g, uint32_t *symbuf_b, size_t output_words, const uint32_t *palette_rgb888);
-
 // Optimized 2bpp packed encoder for 800x600 (4× scaling + centered borders, mandatory palette)
-void tmds_encode_2bpp_packed_800x600(const uint8_t *packed_pixbuf, uint32_t *symbuf_r, uint32_t *symbuf_g, uint32_t *symbuf_b, size_t output_words, const uint32_t *palette_rgb888);
+void tmds_encode_2bpp_packed_gameboy(const uint8_t *packed_pixbuf, uint32_t *symbuf_r, uint32_t *symbuf_g, uint32_t *symbuf_b, size_t output_words, const uint32_t *palette_rgb888);
 
 // Uses interp0:
 void tmds_encode_loop_16bpp(const uint32_t *pixbuf, uint32_t *symbuf, size_t n_pix);

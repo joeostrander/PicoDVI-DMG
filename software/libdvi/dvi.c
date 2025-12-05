@@ -205,7 +205,7 @@ static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp_gameboy)(struct dvi_i
     
     // Call the optimized 2bpp packed encoder with 4× horizontal scaling and palette
     // Input: 40 bytes (160 pixels packed) → Output: 400 words (80+640+80 pixels with borders)
-    tmds_encode_2bpp_packed_800x600(
+    tmds_encode_2bpp_packed_gameboy(
         packed_scanbuf,
         tmdsbuf + 2 * words_per_channel,  // Red channel
         tmdsbuf + 1 * words_per_channel,  // Green channel  

@@ -305,100 +305,6 @@ void __not_in_flash_func(tmds_encode_palette_data)(const uint32_t *pixbuf, const
 #endif
 }
 
-// Optimized 2bpp packed encoder for 640x480 resolution
-// Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
-// Output: TMDS symbols with 4× horizontal scaling (160→640 pixels), NO borders
-// With DVI_SYMBOLS_PER_WORD=2: 640 pixels = 320 words per channel
-// Palette: Optional RGB888 palette (if NULL, uses grayscale)
-void __not_in_flash_func(tmds_encode_2bpp_packed_640x480)(
-    const uint8_t *packed_pixbuf,    // Input: 40 bytes (160 pixels packed)
-    uint32_t *symbuf_r,              // Output: Red channel TMDS symbols
-    uint32_t *symbuf_g,              // Output: Green channel TMDS symbols
-    uint32_t *symbuf_b,              // Output: Blue channel TMDS symbols
-    size_t output_words,             // Number of output words per channel (640 pixels / 2 = 320 words)
-    const uint32_t *palette_rgb888   // Palette: 4 RGB888 colors (0xRRGGBB format), or NULL for grayscale
-) {
-    // Grayscale TMDS symbol pairs (used if palette_rgb888 == NULL)
-    static const uint32_t tmds_gray_pairs[4] = {
-        0xbfa01u,  // GB 0 = White (brightest)   - table index 63 (255>>2)
-        0xb3a31u,  // GB 1 = Light gray          - table index 42 (170>>2)  
-        0xa7a61u,  // GB 2 = Dark gray           - table index 21 (85>>2)
-        0x40dfcu   // GB 3 = Black (darkest)     - table index 1  (0>>2)
-    };
-    
-    // Build TMDS symbol lookup tables from RGB888 palette (if provided)
-    uint32_t tmds_palette_red[4];
-    uint32_t tmds_palette_green[4];
-    uint32_t tmds_palette_blue[4];
-    
-    if (palette_rgb888 != NULL) {
-        // Build palette lookup tables from RGB888
-        for (int i = 0; i < 4; i++) {
-            uint32_t color = palette_rgb888[i];
-            uint8_t r8 = (color >> 16) & 0xFF;
-            uint8_t g8 = (color >> 8) & 0xFF;
-            uint8_t b8 = color & 0xFF;
-            
-            // Convert 8-bit to 6-bit indices for tmds_table lookup
-            tmds_palette_red[i]   = tmds_table[r8 >> 2];
-            tmds_palette_green[i] = tmds_table[g8 >> 2];
-            tmds_palette_blue[i]  = tmds_table[b8 >> 2];
-        }
-    } else {
-        // Use grayscale palette
-        for (int i = 0; i < 4; i++) {
-            tmds_palette_red[i]   = tmds_gray_pairs[i];
-            tmds_palette_green[i] = tmds_gray_pairs[i];
-            tmds_palette_blue[i]  = tmds_gray_pairs[i];
-        }
-    }
-
-    const uint8_t *src = packed_pixbuf;
-    size_t word_idx = 0;
-    
-    // GAME AREA: 160 pixels → 640 pixels (4× scaling) = 320 words
-    // Process each input byte (contains 4 packed pixels)
-    for (size_t byte_idx = 0; byte_idx < 40; byte_idx++) {
-        uint8_t packed_byte = src[byte_idx];
-        
-        // Extract and process each of the 4 pixels in this byte
-        for (int pixel_in_byte = 0; pixel_in_byte < 4; pixel_in_byte++) {
-            // Extract 2-bit pixel value (MSB first: bits 7-6, 5-4, 3-2, 1-0)
-            uint shift = (3 - pixel_in_byte) * 2;
-            uint8_t pixel_2bpp = (packed_byte >> shift) & 0x03;
-            
-            // Get TMDS symbol pair for this color
-            uint32_t word_r = tmds_palette_red[pixel_2bpp];
-            uint32_t word_g = tmds_palette_green[pixel_2bpp];
-            uint32_t word_b = tmds_palette_blue[pixel_2bpp];
-            
-            // Replicate this pixel 4× by writing the same word twice
-            // Each word contains 2 pixels, so 2 words = 4 pixels total
-            symbuf_r[word_idx] = word_r;
-            symbuf_g[word_idx] = word_g;
-            symbuf_b[word_idx] = word_b;
-            word_idx++;
-            
-            symbuf_r[word_idx] = word_r;
-            symbuf_g[word_idx] = word_g;
-            symbuf_b[word_idx] = word_b;
-            word_idx++;
-        }
-    }
-    
-    // Fill any remaining output with black (if output_words > 320)
-    uint32_t black_r = tmds_palette_red[3];
-    uint32_t black_g = tmds_palette_green[3];
-    uint32_t black_b = tmds_palette_blue[3];
-    
-    while (word_idx < output_words) {
-        symbuf_r[word_idx] = black_r;
-        symbuf_g[word_idx] = black_g;
-        symbuf_b[word_idx] = black_b;
-        word_idx++;
-    }
-}
-
 // Flexible 2bpp packed encoder with runtime RGB888 palette support
 // Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
 // Output: RGB TMDS symbols with centered 4× horizontal scaling (160→640 pixels) + optional borders
@@ -410,7 +316,7 @@ void __not_in_flash_func(tmds_encode_2bpp_packed_640x480)(
 // Input: 40 bytes (160 GB pixels packed as 2bpp)
 // Output: 800 pixels (80 black border + 640 game area + 80 black border)
 // With DVI_SYMBOLS_PER_WORD=2: 800 pixels = 400 words per channel
-void __not_in_flash_func(tmds_encode_2bpp_packed_800x600)(
+void __not_in_flash_func(tmds_encode_2bpp_packed_gameboy)(
     const uint8_t *packed_pixbuf,    // Input: 40 bytes (160 pixels packed)
     uint32_t *symbuf_r,              // Output: Red channel TMDS symbols
     uint32_t *symbuf_g,              // Output: Green channel TMDS symbols
