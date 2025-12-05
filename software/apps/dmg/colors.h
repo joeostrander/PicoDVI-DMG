@@ -78,7 +78,7 @@ int get_border_color_index(void);
 void set_border_color_index(int index);
 void increase_border_color_index(int direction);
 void increase_color_scheme_index(int direction);
-color_scheme_t* get_scheme(void);
+const color_scheme_t* get_scheme(void);  // Returns const pointer to flash data
 int get_scheme_index(void);
 void set_scheme_index(int index);
 uint16_t rgb888_to_rgb222(uint32_t color);

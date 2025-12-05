@@ -128,9 +128,8 @@ static volatile uint8_t* packed_display_ptr = NULL;
 static volatile bool frameblending_enabled = false;
 
 // Frame blending lookup tables for ultra-fast processing
-// Precomputed results for all 256×256 combinations of current and previous bytes
-// Tables are computed at initialization
-static uint8_t blend_lut[256][256];       // Blended output
+// Precomputed lookup table for brightening effect (256 bytes)
+// Only store_lut is needed; blend calculation is done inline to save 64KB of RAM
 static uint8_t store_lut[256];             // What to store for next frame
 
 
@@ -225,14 +224,8 @@ const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
 
 struct dvi_inst dvi0;
 
-#if RESOLUTION_800x600
-// For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
-// - Buffer contains packed 2bpp data (4 pixels per byte)
-// - 160 pixels = 40 bytes per scanline
-// - The TMDS encoder handles 5× horizontal scaling (160→800 pixels) with RGB888 palette
-uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
-
-// RGB888 palettes for 800x600 mode (used by TMDS encoder)
+// RGB888 palettes - shared by both 640x480 and 800x600 modes
+// Store in flash to save RAM
 const uint32_t palette__dmg_nso[4] = {
     0x8cad28,  // GB 0 = White (DMG green lightest)
     0x6c9421,  // GB 1 = Light gray
@@ -251,6 +244,14 @@ const uint32_t* game_palette_rgb888 = palette__gbp_nso;
 
 static void set_game_palette(int index);
 
+#if RESOLUTION_800x600
+// For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
+// - Buffer contains packed 2bpp data (4 pixels per byte)
+// - 160 pixels = 40 bytes per scanline
+// - The TMDS encoder handles 4× horizontal scaling (160→640 pixels) with RGB888 palette
+// - Plus 80 pixels of horizontal borders on each side (80+640+80 = 800 pixels total)
+uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
+
 #else // 640x480
 // For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
 // - Buffer contains packed 2bpp data (4 pixels per byte)
@@ -258,6 +259,7 @@ static void set_game_palette(int index);
 // - The TMDS encoder handles 4× horizontal scaling (160→640 pixels)
 // - No hardware doubling needed - encoder outputs full 640 pixels!
 uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
+
 #endif // RESOLUTION
 
 #if ENABLE_AUDIO
@@ -304,11 +306,10 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void);
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline);
 
 void core1_main(void)
-{
-    dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
+{    dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
     dvi_start(&dvi0);
 #if RESOLUTION_800x600
-    dvi_scanbuf_main_2bpp_palette(&dvi0);  // Use 2bpp packed with RGB888 palette (5× scaling)
+    dvi_scanbuf_main_2bpp_palette(&dvi0);  // Use 2bpp packed with RGB888 palette (4× scaling + 80px borders)
 #else // 640x480
     dvi_scanbuf_main_2bpp(&dvi0);  // Use optimized 2bpp packed encoder (4× scaling)
 #endif // RESOLUTION
@@ -341,11 +342,11 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline
         
         const uint8_t* packed_fb = (const uint8_t*)packed_display_ptr;
         if (packed_fb != NULL) {
-            const uint8_t* packed_line = packed_fb + (dmg_line_idx * DMG_PIXELS_X / 4);  // 40 bytes per line
-            
+            const uint8_t* packed_line = packed_fb + (dmg_line_idx * DMG_PIXELS_X / 4);  // 40 bytes per line            
             // Simply copy the packed 2bpp data directly!
             // No unpacking, no palette lookup - the TMDS encoder handles everything
-            // Encoder will apply RGB888 palette and 5× horizontal scaling (160→800 pixels)
+            // Encoder will apply RGB888 palette and 4× horizontal scaling (160→640 pixels)
+            // Plus 80 pixels of blank borders on each side for centering in 800 pixels
             memcpy(line_buffer, packed_line, sizeof(line_buffer));  // Copy 40 bytes
         } else {
             // No frame yet, fill with black
@@ -418,23 +419,8 @@ static void init_frame_blending_luts(void) {
         }
         store_lut[curr] = result;
     }
-    
-    // Build the blend_lut (blended output for current and previous bytes)
-    // This implements: new_value == 0 ? new_value|*pixel_old : new_value
-    for (int curr = 0; curr < 256; curr++) {
-        for (int prev = 0; prev < 256; prev++) {
-            uint8_t result = 0;
-            for (int pixel = 0; pixel < 4; pixel++) {
-                int shift = (3 - pixel) * 2;
-                uint8_t p_curr = (curr >> shift) & 0x03;
-                uint8_t p_prev = (prev >> shift) & 0x03;
-                // White (0) pixels OR with previous (shows ghost), non-white use current
-                uint8_t blended = (p_curr == 0) ? (p_curr | p_prev) : p_curr;
-                result |= (blended << shift);
-            }
-            blend_lut[curr][prev] = result;
-        }
-    }
+      // Note: blend_lut removed to save 64KB RAM (65,536 bytes)
+    // Blending is now calculated inline in the frame processing loop
 }
 
 int main(void)
@@ -458,18 +444,13 @@ int main(void)
         stdio_flush();
         sleep_ms(100);
     }
-    
-    vreg_set_voltage(VREG_VSEL);
+      vreg_set_voltage(VREG_VSEL);
     sleep_ms(10);    
-    set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);    // Convert mario image from 8bpp to 2bpp packed format
-    // Both modes capture in packed format from Game Boy
-    for (int i = 0; i < DMG_PIXEL_COUNT; i += 4) {
-        uint8_t p0 = mario_lut_160x144[i + 0] & 0x03;
-        uint8_t p1 = mario_lut_160x144[i + 1] & 0x03;
-        uint8_t p2 = mario_lut_160x144[i + 2] & 0x03;
-        uint8_t p3 = mario_lut_160x144[i + 3] & 0x03;
-        packed_buffer_0[i / 4] = (p0 << 6) | (p1 << 4) | (p2 << 2) | p3;
-    }
+    set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
+
+    // Mario image is now pre-packed in 2bpp format (saves 17KB RAM!)
+    // Simply copy the packed data directly to the display buffers
+    memcpy(packed_buffer_0, mario_packed_160x144, PACKED_FRAME_SIZE);
     memcpy(packed_buffer_1, packed_buffer_0, PACKED_FRAME_SIZE);
 
     // Both modes use packed buffer directly (TMDS encoder handles palette and scaling)
@@ -477,16 +458,14 @@ int main(void)
 
     // setup_default_uart();
     // stdio_uart_init_full(UART_ID, BAUD_RATE, UART_TX_PIN, UART_RX_PIN);
-
     dvi0.timing = &DVI_TIMING;
     dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
     //dvi0.scanline_callback = (dvi_callback_t*)core1_scanline_callback;
     dvi0.scanline_callback = core1_scanline_callback;
     dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
 
-#if RESOLUTION_800x600
+    // Set initial palette for both 640x480 and 800x600 modes
     set_game_palette(SCHEME_SGB_4H);
-#endif
 
     uint32_t *bufptr = (uint32_t*)line_buffer;
     queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
@@ -642,15 +621,22 @@ int main(void)
                 // Ultra-fast frame blending using precomputed lookup tables
                 // Logic from old_code.c:
                 //   - Blend: white pixels (0) OR with previous frame
-                //   - Store: non-white pixels become gray (2) to "brighten up the previous frame"
-                // This creates visible ghost trails that fade after one frame
-                // No branches, no bit manipulation - just array lookups!
+                //   - Store: non-white pixels become gray (2) to "brighten up the previous frame"                // This creates visible ghost trails that fade after one frame
+                // Blend calculation done inline to save 64KB RAM (instead of blend_lut)
                 for (size_t i = 0; i < PACKED_FRAME_SIZE; i++) {
                     uint8_t current = completed_packed[i];
                     uint8_t previous = packed_buffer_previous[i];
                     
-                    // Single lookup for blended result (current OR previous for white pixels)
-                    completed_packed[i] = blend_lut[current][previous];
+                    // Calculate blended result inline: white (0) pixels OR with previous (ghost effect)
+                    uint8_t blended = 0;
+                    for (int pixel = 0; pixel < 4; pixel++) {
+                        int shift = (3 - pixel) * 2;
+                        uint8_t p_curr = (current >> shift) & 0x03;
+                        uint8_t p_prev = (previous >> shift) & 0x03;
+                        uint8_t p_blend = (p_curr == 0) ? (p_curr | p_prev) : p_curr;
+                        blended |= (p_blend << shift);
+                    }
+                    completed_packed[i] = blended;
                     
                     // Single lookup for brightened ghost (non-white→gray, white→white)
                     // This matches: *pixel_old++ = new_value > 0 ? 2 : 0;
@@ -662,11 +648,10 @@ int main(void)
             // CRITICAL: Use memory barrier and atomic swap to prevent race conditions
             // Ensure all DMA writes are visible before swapping
             __dmb(); // Data Memory Barrier
-            
-            // Atomic pointer swap - Core 1 will see this as a single operation
+              // Atomic pointer swap - Core 1 will see this as a single operation
             // No unpacking needed! TMDS encoder handles everything:
             // - 640x480: 4× scaling with grayscale/GBP color palette
-            // - 800x600: 5× scaling with RGB888 palette
+            // - 800x600: 4× scaling with RGB888 palette + 80px borders on each side
             packed_display_ptr = (volatile uint8_t*)completed_packed;
             
             // Another barrier to ensure the pointer write is visible
@@ -1033,7 +1018,7 @@ static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t eve
 }
 #endif // ENABLE_CPU_DMG_BUTTONS
 
-#if RESOLUTION_800x600
+// Palette support for both 640x480 and 800x600 modes
 static void set_game_palette(int index)
 {
     if ((index <0) || index >= NUMBER_OF_SCHEMES)
@@ -1043,6 +1028,6 @@ static void set_game_palette(int index)
     game_palette_rgb888 = (uint32_t*)get_scheme();
 
     // Set RGB888 palette pointer for 2bpp palette mode
+    // Works for both 640x480 (no borders) and 800x600 (with borders)
     dvi_get_blank_settings(&dvi0)->palette_rgb888 = game_palette_rgb888;
 }
-#endif // RESOLUTION

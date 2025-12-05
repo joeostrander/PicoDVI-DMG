@@ -183,30 +183,39 @@ static inline void __dvi_func_x(_dvi_prepare_scanline_8bpp)(struct dvi_inst *ins
 // Optimized 2bpp packed grayscale encoder for Game Boy (SPW=2, 4× horizontal scaling)
 // Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
 // Output: 640 pixels (160 × 4 in encoder)
-static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp)(struct dvi_inst *inst, const uint8_t *packed_scanbuf) {
+// 2bpp packed encoder for 640x480 resolution (SPW=2, 4× horizontal scaling)
+// Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
+// Output: 640 pixels (no borders)
+// Supports optional RGB888 palette (stored in inst->blank_settings.palette_rgb888)
+// If palette is NULL, falls back to grayscale mode
+static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp_640x480)(struct dvi_inst *inst, const uint8_t *packed_scanbuf) {
     uint32_t *tmdsbuf = NULL;
     queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
     uint pixwidth = inst->timing->h_active_pixels;  // 640
     uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;  // 640/2 = 320 words
     
-    // Call the optimized 2bpp packed encoder with 4× horizontal scaling
-    // Input: 40 bytes (160 pixels packed) → Output: 320 words (640 pixels with 4× scaling)
-    // We pass words_per_channel so it fills the entire scanline (pads with black if needed)
-    tmds_encode_2bpp_packed_grayscale(
+    // Get palette from inst (can be NULL for grayscale)
+    const uint32_t *palette = (const uint32_t*)inst->blank_settings.palette_rgb888;
+    
+    // Call the optimized 2bpp packed encoder with optional palette
+    // Input: 40 bytes (160 pixels packed) → Output: 320 words (640 pixels, no borders)
+    tmds_encode_2bpp_packed_640x480(
         packed_scanbuf,
-        tmdsbuf + 0 * words_per_channel,  // Blue channel
-        tmdsbuf + 1 * words_per_channel,  // Green channel  
         tmdsbuf + 2 * words_per_channel,  // Red channel
-        words_per_channel  // Fill entire scanline (320 words = 640 pixels with SPW=2)
+        tmdsbuf + 1 * words_per_channel,  // Green channel  
+        tmdsbuf + 0 * words_per_channel,  // Blue channel
+        words_per_channel,  // Fill entire scanline (320 words = 640 pixels with SPW=2)
+        palette  // RGB888 palette (4 colors), or NULL for grayscale
     );
-      queue_add_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
+      
+    queue_add_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
 }
 
-// 2bpp packed encoder with RGB888 palette support for 800x600 mode (SPW=2, 5× horizontal scaling)
+// 2bpp packed encoder for 800x600 resolution (SPW=2, 4× horizontal scaling + borders)
 // Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
-// Output: 800 pixels (160 × 5 in encoder)
+// Output: 800 pixels (80 blank + 640 game + 80 blank)
 // Palette pointer is stored in inst->blank_settings.palette_rgb888
-static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp_palette)(struct dvi_inst *inst, const uint8_t *packed_scanbuf) {
+static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp_800x600)(struct dvi_inst *inst, const uint8_t *packed_scanbuf) {
     uint32_t *tmdsbuf = NULL;
     queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
     uint pixwidth = inst->timing->h_active_pixels;  // 800
@@ -225,9 +234,9 @@ static inline void __dvi_func_x(_dvi_prepare_scanline_2bpp_palette)(struct dvi_i
         palette = default_palette;
     }
     
-    // Call the optimized 2bpp packed encoder with 5× horizontal scaling and palette
-    // Input: 40 bytes (160 pixels packed) → Output: 400 words (800 pixels with 5× scaling)
-    tmds_encode_2bpp_packed_palette(
+    // Call the optimized 2bpp packed encoder with 4× horizontal scaling and palette
+    // Input: 40 bytes (160 pixels packed) → Output: 400 words (80+640+80 pixels with borders)
+    tmds_encode_2bpp_packed_800x600(
         packed_scanbuf,
         tmdsbuf + 2 * words_per_channel,  // Red channel
         tmdsbuf + 1 * words_per_channel,  // Green channel  
@@ -265,22 +274,22 @@ void __dvi_func(dvi_scanbuf_main_8bpp)(struct dvi_inst *inst) {
 
 // Optimized 2bpp packed grayscale (SPW=2, 2× horizontal scaling)
 // This is the most efficient version - direct packed 2bpp to TMDS encoding!
-void __dvi_func(dvi_scanbuf_main_2bpp)(struct dvi_inst *inst) {
+void __dvi_func(dvi_scanbuf_main_2bpp_640x480)(struct dvi_inst *inst) {
     while (1) {
         const uint8_t *scanbuf = NULL;
         queue_remove_blocking_u32(&inst->q_colour_valid, (uint32_t*)&scanbuf);
-        _dvi_prepare_scanline_2bpp(inst, scanbuf);
+        _dvi_prepare_scanline_2bpp_640x480(inst, scanbuf);
         queue_add_blocking_u32(&inst->q_colour_free, (uint32_t*)&scanbuf);
     }
     __builtin_unreachable();
 }
 
 // 2bpp packed with RGB888 palette support for 800x600 mode
-void __dvi_func(dvi_scanbuf_main_2bpp_palette)(struct dvi_inst *inst) {
+void __dvi_func(dvi_scanbuf_main_2bpp_800x600)(struct dvi_inst *inst) {
     while (1) {
         const uint8_t *scanbuf = NULL;
         queue_remove_blocking_u32(&inst->q_colour_valid, (uint32_t*)&scanbuf);
-        _dvi_prepare_scanline_2bpp_palette(inst, scanbuf);
+        _dvi_prepare_scanline_2bpp_800x600(inst, scanbuf);
         queue_add_blocking_u32(&inst->q_colour_free, (uint32_t*)&scanbuf);
     }
     __builtin_unreachable();

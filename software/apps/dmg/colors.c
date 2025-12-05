@@ -7,7 +7,8 @@
 // I had the high bit/low bit reversed on some PCB revs
 static bool rgb_bits_reversed = false;
 
-static color_scheme_t color_schemes[NUMBER_OF_SCHEMES] = 
+// Store color schemes in flash to save RAM (608 bytes!)
+static const color_scheme_t color_schemes[NUMBER_OF_SCHEMES] = 
 {
     [SCHEME_BLACK_AND_WHITE] =  { 0xF7F3F7, 0x4E4C4E, 0xB5B2B5, 0x000000 },
     [SCHEME_INVERTED] =         { 0x000000, 0xB5B2B5, 0x4E4C4E, 0xF7F3F7 },
@@ -97,12 +98,11 @@ void set_border_color_index(int index)
 
 void increase_color_scheme_index(int direction)
 {
-    color_scheme_index += direction;
-    color_scheme_index = color_scheme_index >= NUMBER_OF_SCHEMES ? 0 : color_scheme_index;
+    color_scheme_index += direction;    color_scheme_index = color_scheme_index >= NUMBER_OF_SCHEMES ? 0 : color_scheme_index;
     color_scheme_index = color_scheme_index < 0 ? (NUMBER_OF_SCHEMES-1) : color_scheme_index;
 }
 
-color_scheme_t* get_scheme(void)
+const color_scheme_t* get_scheme(void)
 {
     return &color_schemes[color_scheme_index];
 }
