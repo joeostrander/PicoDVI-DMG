@@ -2,10 +2,7 @@
 
 TODO:
 
-    fix vsync issue?
-
-
-    Get HDMI (DVI) working on real TV?
+    Get HDMI (DVI) working on real TV - works in 640x480
     Possibly pull in some of the OSD features from PicoDVI-N64
     cleanup unused headers
     Add my version of OSD back in
@@ -42,7 +39,6 @@ TODO:
 #include "dvi_serialiser.h"
 #include "common_dvi_pin_configs.h"
 #include "dmg_buttons.pio.h"
-#include "dmg_buttons_simple.pio.h"
 #include "tmds_encode.h"
 #include "audio_ring.h"  // For get_write_size and get_read_size
 
@@ -52,22 +48,31 @@ TODO:
 #include "hardware/pwm.h"
 #include "analog_microphone.h"
 #include "emusound.h"
+
+#include "colors.h"
+
+// ===== VIDEO CAPTURE MODE SELECTION =====
+// Toggle between two VSYNC synchronization methods:
+//   1 = IRQ-based (GPIO interrupt on VSYNC rising edge - precise, no PIO wait)
+//   0 = WAIT-based (PIO 'wait' instruction for VSYNC - simpler, may scroll on power-on)
+#define USE_VSYNC_IRQ 1  // Change to 0 to test WAIT mode, 1 for IRQ mode
+// =========================================
+
 #include "video_capture.pio.h"  // PIO-based video capture
 #include "shared_dma_handler.h"
 
-#define ENABLE_AUDIO 1  // Set to 1 to enable audio, 0 to disable all audio code
-#define ENABLE_PIO_DMG_BUTTONS 0  // Set to 1 to enable DMG PIO controller, 0 to disable
-#define ENABLE_PIO_DMG_BUTTONS_SIMPLE 0  // Set to 1 to enable DMG PIO controller, 0 to disable
-#define ENABLE_CPU_DMG_BUTTONS 1  // Set to 1 to enable DMG CPU sending of buttons, 0 to disable
-#define ENABLE_VIDEO_CAPTURE 1
-#define ENABLE_OSD 0  // Set to 1 to enable OSD code, 0 to disable (TODO)
+#define ENABLE_AUDIO                1  // Set to 1 to enable audio, 0 to disable all audio code
+#define ENABLE_PIO_DMG_BUTTONS      0  // Set to 1 to enable DMG PIO controller, 0 to disable
+#define ENABLE_CPU_DMG_BUTTONS      1  // Set to 1 to enable DMG CPU sending of buttons, 0 to disable
+#define ENABLE_VIDEO_CAPTURE        1
+#define ENABLE_OSD                  0  // Set to 1 to enable OSD code, 0 to disable (TODO)
 
 
 #if ENABLE_AUDIO
 static const int hdmi_n[6] = {4096, 6272, 6144, 3136, 4096, 6144};  // 32k, 44.1k, 48k, 22.05k, 16k, 24k
-static uint16_t  rate = SAMPLE_FREQ;
+static uint16_t rate = SAMPLE_FREQ;
 // #define AUDIO_BUFFER_SIZE   (0x1<<8) // Must be power of 2
-audio_sample_t      audio_buffer[AUDIO_BUFFER_SIZE];
+audio_sample_t audio_buffer[AUDIO_BUFFER_SIZE];
 #endif
 
 #define DEBUG_BUTTON_PRESS   // Illuminate LED on button presses
@@ -105,29 +110,27 @@ i2c_inst_t* i2cHandle = i2c1;
 #define DMG_PIXELS_Y                144
 #define DMG_PIXEL_COUNT             (DMG_PIXELS_X*DMG_PIXELS_Y)
 
-// Double buffering: one for capture, one for display
-static uint8_t framebuffer_0[DMG_PIXEL_COUNT] = {0};
-static uint8_t framebuffer_1[DMG_PIXEL_COUNT] = {0};
-// static uint8_t framebuffer_previous[DMG_PIXEL_COUNT] = {0};
-
 // Packed DMA buffers - 4 pixels per byte (2 bits each)
-#define PACKED_FRAME_SIZE (DMG_PIXEL_COUNT / 4)  // 5760 bytes
+// This is the native format from the Game Boy (2 bits per pixel)
+// Used by BOTH 640x480 and 800x600 modes for DMA capture AND display
+#define PACKED_FRAME_SIZE (DMG_PIXEL_COUNT / 4)  // 5760 bytes (160×144 ÷ 4)
 static uint8_t packed_buffer_0[PACKED_FRAME_SIZE] = {0};
 static uint8_t packed_buffer_1[PACKED_FRAME_SIZE] = {0};
+static uint8_t packed_buffer_previous[PACKED_FRAME_SIZE] = {0};  // For frame blending
 
-// Pointers - swapped atomically between capture and display
-// Use framebuffer_display_ptr for atomic swapping instead
-static uint8_t* framebuffer_capture = framebuffer_1;           // Core 0 writes this
+// Both modes now use packed buffers directly!
+// TMDS encoder handles palette conversion and horizontal scaling
+// - 640x480: 4× scaling with grayscale/color palette
+// - 800x600: 5× scaling with RGB888 palette
+static volatile uint8_t* packed_display_ptr = NULL;
 
-static uint8_t* pixel_active;
-static uint8_t* pixel_old;
-// Set to false to disable frame blending for better performance
-// Trade-off: slightly sharper image vs more CPU time for audio
-static bool frameblending_enabled = false;  // Try false for smoother audio
+// Frame blending - blends previous frame with current for sprite overlay effects
+static volatile bool frameblending_enabled = false;
 
-// Flag to signal frame capture needed
-static volatile bool frame_capture_needed = false;
-
+// Frame blending lookup tables for ultra-fast processing
+// Precomputed lookup table for brightening effect (256 bytes)
+// Only store_lut is needed; blend calculation is done inline to save 64KB of RAM
+static uint8_t store_lut[256];             // What to store for next frame
 
 
 typedef enum
@@ -155,11 +158,6 @@ static PIO pio_dmg_buttons = pio0;
 static uint dmg_buttons_sm = 3;  // Use SM3 (SM0, SM1, SM2 used by DVI TMDS channels)
 static uint pio_buttons_out_value = 0;
 #endif
-#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
-static PIO pio_dmg_buttons_simple = pio0;
-static uint dmg_buttons_simple_sm = 3;  // Use SM3 (SM0, SM1, SM2 used by DVI TMDS channels)
-static uint pio_buttons_simple_out_value = 0;
-#endif
 
 // PIO video capture
 // PIO NOTES:
@@ -179,13 +177,7 @@ static uint video_offset = 0;
 static uint8_t button_states[BUTTON_COUNT];
 static uint8_t button_states_previous[BUTTON_COUNT];
 
-
-// Frame swapping synchronization - use atomic pointer swap
-volatile uint8_t* volatile framebuffer_display_ptr = NULL;
-
-// The frame is basically full width
-// - since horizontal is already doubled, I manually repeat each x2 to get 4x scale
-// - using DVI_VERTICAL_REPEAT to repeat vertically by 4
+#if RESOLUTION_800x600
 #define FRAME_WIDTH 800
 #define FRAME_HEIGHT 150    // (x4 via DVI_VERTICAL_REPEAT)
 
@@ -205,10 +197,15 @@ const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
 	.bit_clk_khz       = 280000
 };
 
-// #define VREG_VSEL VREG_VOLTAGE_1_25  // Increased from 1.20V for stable 280 MHz clocks
 #define VREG_VSEL VREG_VOLTAGE_1_20
 #define DVI_TIMING dvi_timing_800x600p_60hz_280K
+#else   // 640x480
+#define FRAME_WIDTH 640
+#define FRAME_HEIGHT 160    // (×3 via DVI_VERTICAL_REPEAT = 480 lines)
 
+#define VREG_VSEL VREG_VOLTAGE_1_10  // 252 MHz is comfortable at lower voltage
+#define DVI_TIMING dvi_timing_640x480p_60hz
+#endif
 
 // // UART config on the last GPIOs
 // #define UART_TX_PIN (28)
@@ -227,26 +224,43 @@ const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
 
 struct dvi_inst dvi0;
 
-uint8_t line_buffer[FRAME_WIDTH/DVI_SYMBOLS_PER_WORD] = {0};
-
-uint8_t colors__dmg_nso[] = {
-    RGB888_TO_RGB332(0x8c, 0xad, 0x28), 
-    RGB888_TO_RGB332(0x6c, 0x94, 0x21), 
-    RGB888_TO_RGB332(0x42, 0x6b, 0x29), 
-    RGB888_TO_RGB332(0x21, 0x42, 0x31)
-};
-uint8_t colors__gbp_nso[] = {
-    RGB888_TO_RGB332(0xb5, 0xc6, 0x9c), 
-    RGB888_TO_RGB332(0x8d, 0x9c, 0x7b), 
-    RGB888_TO_RGB332(0x6c, 0x72, 0x51), 
-    RGB888_TO_RGB332(0x30, 0x38, 0x20)
+// RGB888 palettes - shared by both 640x480 and 800x600 modes
+// Store in flash to save RAM
+const uint32_t palette__dmg_nso[4] = {
+    0x8cad28,  // GB 0 = White (DMG green lightest)
+    0x6c9421,  // GB 1 = Light gray
+    0x426b29,  // GB 2 = Dark gray
+    0x214231   // GB 3 = Black (DMG green darkest)
 };
 
-//0xFF, 0xB6, 0x6D, 0x00
-uint8_t* game_palette = colors__gbp_nso;
+const uint32_t palette__gbp_nso[4] = {
+    0xb5c69c,  // GB 0 = White (GBP lightest)
+    0x8d9c7b,  // GB 1 = Light gray
+    0x6c7251,  // GB 2 = Dark gray
+    0x303820   // GB 3 = Black (GBP darkest)
+};
 
-uint8_t background_color = RGB888_TO_RGB332(0x00, 0x00, 0xFF);
+const uint32_t* game_palette_rgb888 = palette__gbp_nso;
 
+static void set_game_palette(int index);
+
+#if RESOLUTION_800x600
+// For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
+// - Buffer contains packed 2bpp data (4 pixels per byte)
+// - 160 pixels = 40 bytes per scanline
+// - The TMDS encoder handles 4× horizontal scaling (160→640 pixels) with RGB888 palette
+// - Plus 80 pixels of horizontal borders on each side (80+640+80 = 800 pixels total)
+uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
+
+#else // 640x480
+// For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
+// - Buffer contains packed 2bpp data (4 pixels per byte)
+// - 160 pixels = 40 bytes per scanline
+// - The TMDS encoder handles 4× horizontal scaling (160→640 pixels)
+// - No hardware doubling needed - encoder outputs full 640 pixels!
+uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
+
+#endif // RESOLUTION
 
 #if ENABLE_AUDIO
 // configuration
@@ -281,66 +295,69 @@ static void initialize_gpio(void);
 #if ENABLE_PIO_DMG_BUTTONS
 static void initialize_dmg_buttons_pio_program(void);
 #endif
-#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
-static void initialize_dmg_buttons_simple_pio_program(void);
-#endif
+
 #if ENABLE_CPU_DMG_BUTTONS
 static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t events);
 #endif
 
 static bool __no_inline_not_in_flash_func(nes_classic_controller)(void);
-
-// static void __no_inline_not_in_flash_func(core1_scanline_callback)(void);
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline);
 
 void core1_main(void)
 {
     dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
     dvi_start(&dvi0);
-    dvi_scanbuf_main_8bpp(&dvi0);
+    dvi_scanbuf_main_2bpp_gameboy(&dvi0);
 
     __builtin_unreachable();
 }
 
-// void core1_scanline_callback(void)
-// static void __no_inline_not_in_flash_func(core1_scanline_callback)(void)
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
 {
-    // Note first two scanlines are pushed before DVI start
-    //static uint myscanline = 2;
-    uint myscanline = scanline;
-    uint idx = 0;
-    uint border_horz = 40;
-    uint border_vert = 3;
-    static uint frame_idx = 0;
     static uint dmg_line_idx = 0;
-    // TODO: calc array start from scanline...
-    // scanlines are 0 to 149 cuz frame height 150
-    if (myscanline < border_vert || myscanline >= FRAME_HEIGHT-border_vert)
+    
+    // scanlines are 0 to 143 (Game Boy native resolution, scaled 4× vertically to 576)
+    
+#if DVI_VERTICAL_REPEAT == 4
+    // 600 lines / 4 = 150 scanlines
+    // 144 rows of pixels
+    // 150 - 144 = 6 extra lines
+    // divide by 2 to center vertically = 3
+    int offset = 3;
+#else // DVI_VERTICAL_REPEAT == 3
+    // 480 rows of pixels / 3 = 160 scanlines
+    // 144 rows of pixels
+    // 160 - 144 = 16 extra lines
+    // divide by 2 to center vertically = 8
+    int offset = 8;
+#endif
+
+    // Note:  First two scanlines are pushed before DVI start, so subtract 2 from offset
+    offset -= 2;
+
+    if ((scanline < offset) || (scanline >= (DMG_PIXELS_Y+offset)))
     {
-        for (uint i = 0; i < sizeof(line_buffer); i++)
-        {
-            line_buffer[idx++] = background_color;
-        }
+        // Beyond game area - fill with black (all bits set = 0xFF for each pixel pair)
+        // In 2bpp packed format: 0xFF = all pixels are value 3 (black/darkest color in palette)
+        memset(line_buffer, 0xFF, sizeof(line_buffer));
         dmg_line_idx = 0;
     }
-    else    {
-        dmg_line_idx = myscanline - border_vert;
-        for (uint i = 0; i < border_horz; i++)
-            line_buffer[idx++] = background_color;
+    else 
+    {
+        dmg_line_idx = scanline - offset;
         
-        for (uint i = 0; i < DMG_PIXELS_X; i++)
-        {
-            frame_idx = dmg_line_idx * DMG_PIXELS_X + i;
-            // Read from atomic pointer - single load operation
-            uint8_t* fb = (uint8_t*)framebuffer_display_ptr;
-            line_buffer[idx++] = game_palette[fb[frame_idx]];
-            line_buffer[idx++] = game_palette[fb[frame_idx]];
-            
+        const uint8_t* packed_fb = (const uint8_t*)packed_display_ptr;
+        if (packed_fb != NULL) {
+            const uint8_t* packed_line = packed_fb + (dmg_line_idx * DMG_PIXELS_X / 4);  // 40 bytes per line            
+            // Simply copy the packed 2bpp data directly!
+            // No unpacking, no palette lookup - the TMDS encoder handles everything
+            // Encoder will apply RGB888 palette and 4× horizontal scaling (160→640 pixels)
+            // Plus 80 pixels of blank borders on each side for centering in 800 pixels
+            memcpy(line_buffer, packed_line, sizeof(line_buffer));  // Copy 40 bytes
+        } else {
+            // No frame yet, fill with black
+            memset(line_buffer, 0xFF, sizeof(line_buffer));
         }
-
-        for (uint i = 0; i < border_horz; i++)
-            line_buffer[idx++] = background_color;
     }
 
     const uint32_t *bufptr = (uint32_t*)line_buffer;
@@ -348,10 +365,33 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline
     
     while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
     ;
-    // myscanline = (myscanline + 1) % FRAME_HEIGHT;
-    if (++myscanline >= FRAME_HEIGHT) {
-        myscanline = 0;
+}
+
+// Initialize frame blending lookup tables for ultra-fast processing
+// Called once at startup to precompute all 256×256 byte combinations
+// This implements the exact logic from old_code.c:
+//   Blend: new_value == 0 ? new_value|*pixel_old : new_value
+//   Store: new_value > 0 ? 2 : 0  (brightens ghosts by storing gray)
+// Used by BOTH 640x480 and 800x600 modes
+static void init_frame_blending_luts(void) {
+    // Build the store_lut first (what to save for next frame's ghost)
+    // This implements: *pixel_old++ = new_value > 0 ? 2 : 0;
+    // For each byte, convert: non-white pixels → gray (2), white → white (0)
+    // The "2" (gray) value creates the "brightened" ghost effect
+    for (int curr = 0; curr < 256; curr++) {
+        uint8_t result = 0;
+        for (int pixel = 0; pixel < 4; pixel++) {
+            int shift = (3 - pixel) * 2;
+            uint8_t p = (curr >> shift) & 0x03;
+            // Non-white (1,2,3) becomes gray (2), white (0) stays white (0)
+            // This is the "brighten up the previous frame" logic!
+            uint8_t store_p = (p > 0) ? 2 : 0;
+            result |= (store_p << shift);
+        }
+        store_lut[curr] = result;
     }
+      // Note: blend_lut removed to save 64KB RAM (65,536 bytes)
+    // Blending is now calculated inline in the frame processing loop
 }
 
 int main(void)
@@ -361,11 +401,13 @@ int main(void)
     {
         button_states[i] = BUTTON_STATE_UNPRESSED;
         button_states_previous[i] = BUTTON_STATE_UNPRESSED;
-    }
-
-    // Initialize stdio for USB serial debugging
+    }    // Initialize stdio for USB serial debugging
     stdio_init_all();
     sleep_ms(3000);  // Give USB more time to enumerate
+
+    // Initialize frame blending lookup tables (one-time computation)
+    // Both modes use packed buffers for capture, so both need LUTs
+    init_frame_blending_luts();
     
     // Force flush and try multiple times
     for (int i = 0; i < 5; i++) {
@@ -373,23 +415,28 @@ int main(void)
         stdio_flush();
         sleep_ms(100);
     }
-    
-    vreg_set_voltage(VREG_VSEL);
-    sleep_ms(10);    set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
+      vreg_set_voltage(VREG_VSEL);
+    sleep_ms(10);    
+    set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
 
-    // preload an image (160x144) into both framebuffers
-    framebuffer_display_ptr = framebuffer_0;
-    memcpy((void*)framebuffer_display_ptr, mario_lut_160x144, DMG_PIXEL_COUNT);
-    memcpy(framebuffer_capture, mario_lut_160x144, DMG_PIXEL_COUNT);
+    // Mario image is now pre-packed in 2bpp format (saves 17KB RAM!)
+    // Simply copy the packed data directly to the display buffers
+    memcpy(packed_buffer_0, mario_packed_160x144, PACKED_FRAME_SIZE);
+    memcpy(packed_buffer_1, packed_buffer_0, PACKED_FRAME_SIZE);
+
+    // Both modes use packed buffer directly (TMDS encoder handles palette and scaling)
+    packed_display_ptr = packed_buffer_0;
 
     // setup_default_uart();
     // stdio_uart_init_full(UART_ID, BAUD_RATE, UART_TX_PIN, UART_RX_PIN);
-
     dvi0.timing = &DVI_TIMING;
     dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
     //dvi0.scanline_callback = (dvi_callback_t*)core1_scanline_callback;
     dvi0.scanline_callback = core1_scanline_callback;
     dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
+
+    // Set initial palette for both 640x480 and 800x600 modes
+    set_game_palette(SCHEME_SGB_4H);
 
     uint32_t *bufptr = (uint32_t*)line_buffer;
     queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
@@ -473,67 +520,32 @@ int main(void)
     printf("Initializing PIO programs for DMG controller...\n");
     initialize_dmg_buttons_pio_program();
 #endif
-#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
-    printf("Initializing PIO programs for DMG controller...\n");
-    initialize_dmg_buttons_simple_pio_program();
-#endif
+
 #if ENABLE_CPU_DMG_BUTTONS
-    printf("Setting up GPIO IRQ for DMG controller...\n");
-    // Setup GPIO IRQ for DMG controller reading
-    //TODO!
-#if ENABLE_CPU_DMG_BUTTONS
+    // Set up shared GPIO callback - this handles BOTH DMG buttons AND VSYNC
     gpio_set_irq_enabled_with_callback(DMG_READING_DPAD_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
-    gpio_set_irq_enabled_with_callback(DMG_READING_BUTTONS_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
+    gpio_set_irq_enabled(DMG_READING_BUTTONS_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);  // Callback already registered
 #endif // ENABLE_CPU_DMG_BUTTONS
 
+#if ENABLE_VIDEO_CAPTURE
+#if USE_VSYNC_IRQ
+    // IRQ MODE: Enable VSYNC interrupt (GPIO 4) - must be done AFTER callback is registered above
+    gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true);
+    printf("Video capture mode: IRQ-based VSYNC synchronization\n");
+#else
+    printf("Video capture mode: WAIT-based VSYNC synchronization (PIO wait instruction)\n");
 #endif
-
-    // printf("=== SYSTEM READY - DELAYING BEFORE VIDEO INIT ===\n");
-    // printf("Waiting 7 seconds...\n");
-    // stdio_flush();
-    
-    // // Long delay - let everything stabilize
-    // for (int i = 7; i > 0; i--) {
-    //     printf("%d...\n", i);
-    //     stdio_flush();
-    //     sleep_ms(1000);
-    // }
-    
-    // printf("\n*** PAST COUNTDOWN ***\n");
-    // stdio_flush();
-    // sleep_ms(500);
-
-
-
+#endif
     
 #if ENABLE_VIDEO_CAPTURE
-    // printf("Skipping video initialization (commented out for testing)\n");
-    // stdio_flush();
-    
-    // printf("Starting video initialization NOW...\n");
-    // stdio_flush();
-    // sleep_ms(100);
-    
-    // printf("Step 1: About to call pio_add_program()...\n");
-    // stdio_flush();
-    // sleep_ms(100);
-    
-    video_offset = pio_add_program(pio_video, &video_capture_program);
-    
-    // printf("  -> Loaded at offset %d\n", video_offset);
-    // stdio_flush();
-    
-    // printf("Step 2: About to initialize PIO state machine...\n");
-    // stdio_flush();
+    // Add the appropriate PIO program based on mode
+#if USE_VSYNC_IRQ
+    video_offset = pio_add_program(pio_video, &video_capture_irq_program);
+#else
+    video_offset = pio_add_program(pio_video, &video_capture_wait_program);
+#endif
     
     video_capture_program_init(pio_video, video_sm, video_offset);
-    
-    // printf("  -> State machine initialized\n");
-    // stdio_flush();
-    
-    // printf("Step 3: About to initialize DMA...\n");
-    // stdio_flush();
-    
     
     // Enable DMA interrupt - use IRQ1 (IRQ0 is used by DVI on Core 1)    
     int video_dma_chan = video_capture_dma_init(pio_video, video_sm, DMA_IRQ_1, packed_buffer_0, PACKED_FRAME_SIZE);
@@ -548,22 +560,15 @@ int main(void)
         while (1) { tight_loop_contents(); }
     }
     
-    printf("  -> DMA initialized (packed format: %d bytes)\n", PACKED_FRAME_SIZE);
-    stdio_flush();
-    
-    // printf("If you see this, the countdown works fine\n");
-    // stdio_flush();
+    printf("  -> DMA initialized (packed format: %d bytes)\n", PACKED_FRAME_SIZE);    stdio_flush();
 #endif
 
-    // Track which packed buffer is being captured
+    // Track which packed buffer is being captured (both modes use packed buffers)
     uint8_t* packed_capture = packed_buffer_0;
     uint8_t* packed_next = packed_buffer_1;
     bool video_capture_active = false;
-
-    printf("Entering main loop...\n");
-
     
-    // Main loop - PIO video + purdy good audio
+    // Main loop - PIO video + good audio
     while (true) 
     {
         static uint32_t loop_counter = 0;
@@ -580,39 +585,49 @@ int main(void)
         }        
         // Check if video frame is ready (non-blocking)
         if (video_capture_active && video_capture_frame_ready()) {
-            // Frame complete! Get the packed buffer
+            // Frame complete! Get the packed buffer (2bpp DMA format)
             uint8_t* completed_packed = video_capture_get_frame();
-            
-            // Remove FIFO overflow check - it's too late and causes more problems
-            // The PIO wraps safely to wait for VSYNC, so overflow won't happen
-            
-            // Quickly unpack: 4 pixels per byte -> 1 pixel per byte
-            uint8_t* dest = framebuffer_capture;
-            for (int i = 0; i < PACKED_FRAME_SIZE; i++) {
-                uint8_t packed = completed_packed[i];
-                dest[3] = (packed >> 0) & 0x03;
-                dest[2] = (packed >> 2) & 0x03;
-                dest[1] = (packed >> 4) & 0x03;
-                dest[0] = (packed >> 6) & 0x03;
-                dest += 4;
+              // Apply frame blending if enabled (works on packed 2bpp data)
+            if (frameblending_enabled) {
+                // Ultra-fast frame blending using precomputed lookup tables
+                // Logic from old_code.c:
+                //   - Blend: white pixels (0) OR with previous frame
+                //   - Store: non-white pixels become gray (2) to "brighten up the previous frame"                // This creates visible ghost trails that fade after one frame
+                // Blend calculation done inline to save 64KB RAM (instead of blend_lut)
+                for (size_t i = 0; i < PACKED_FRAME_SIZE; i++) {
+                    uint8_t current = completed_packed[i];
+                    uint8_t previous = packed_buffer_previous[i];
+                    
+                    // Calculate blended result inline: white (0) pixels OR with previous (ghost effect)
+                    uint8_t blended = 0;
+                    for (int pixel = 0; pixel < 4; pixel++) {
+                        int shift = (3 - pixel) * 2;
+                        uint8_t p_curr = (current >> shift) & 0x03;
+                        uint8_t p_prev = (previous >> shift) & 0x03;
+                        uint8_t p_blend = (p_curr == 0) ? (p_curr | p_prev) : p_curr;
+                        blended |= (p_blend << shift);
+                    }
+                    completed_packed[i] = blended;
+                    
+                    // Single lookup for brightened ghost (non-white→gray, white→white)
+                    // This matches: *pixel_old++ = new_value > 0 ? 2 : 0;
+                    packed_buffer_previous[i] = store_lut[current];
+                }
             }
-            // Debug: print first 16 pixels of unpacked buffer
-            // printf("Unpacked[0..15]: ");
-            // for (int dbg = 0; dbg < 16; dbg++) printf("%02X ", framebuffer_capture[dbg]);
-            // printf("\n");
-            
+
+            // Both modes use packed buffer directly (TMDS encoder handles palette and scaling)
             // CRITICAL: Use memory barrier and atomic swap to prevent race conditions
-            // Ensure all writes to framebuffer_capture are visible before swapping
+            // Ensure all DMA writes are visible before swapping
             __dmb(); // Data Memory Barrier
-            
-            // Atomic pointer swap - Core 1 will see this as a single operation
-            framebuffer_display_ptr = (volatile uint8_t*)framebuffer_capture;
+              // Atomic pointer swap - Core 1 will see this as a single operation
+            // No unpacking needed! TMDS encoder handles everything:
+            // - 640x480: 4× scaling with grayscale/GBP color palette
+            // - 800x600: 4× scaling with RGB888 palette + 80px borders on each side
+            packed_display_ptr = (volatile uint8_t*)completed_packed;
             
             // Another barrier to ensure the pointer write is visible
             __dmb();
-              // Ping-pong framebuffers
-            framebuffer_capture = (framebuffer_capture == framebuffer_0) ? framebuffer_1 : framebuffer_0;
-            
+
             // Swap packed buffers for next DMA capture
             uint8_t* temp = packed_capture;
             packed_capture = packed_next;
@@ -623,20 +638,61 @@ int main(void)
             video_capture_start_frame(pio_video, video_sm, packed_capture, PACKED_FRAME_SIZE);
             frames_captured++;
         }
-#endif
+#endif // ENABLE_VIDEO_CAPTURE
+
         loop_counter++;
+        
+        // Check for frame blending toggle (SELECT + HOME) - works for both modes
+        static button_state_t last_home = BUTTON_STATE_UNPRESSED;
+        static button_state_t last_left = BUTTON_STATE_UNPRESSED;
+        static button_state_t last_right = BUTTON_STATE_UNPRESSED;
+        
+        if (button_states[BUTTON_SELECT] == BUTTON_STATE_PRESSED)
+        {
+            if ((button_states[BUTTON_HOME] == BUTTON_STATE_UNPRESSED) 
+                && (last_home == BUTTON_STATE_PRESSED))
+            {
+                frameblending_enabled = !frameblending_enabled;
+                printf("Frame blending: %s\n", frameblending_enabled ? "ENABLED" : "DISABLED");
+                if (!frameblending_enabled) {
+                    // Clear previous frame buffer when disabling
+                    memset(packed_buffer_previous, 0x00, PACKED_FRAME_SIZE);  // 0x00 = all white pixels
+                }
+            }
+
+            if ((button_states[BUTTON_LEFT] == BUTTON_STATE_UNPRESSED)
+                && (last_left == BUTTON_STATE_PRESSED))
+            {
+                int index = get_scheme_index();
+                index--;
+                if (index < 0)
+                    index = NUMBER_OF_SCHEMES - 1;
+
+                set_game_palette(index);
+            }
+
+            if ((button_states[BUTTON_RIGHT] == BUTTON_STATE_UNPRESSED)
+                && (last_right == BUTTON_STATE_PRESSED))
+            {
+                int index = get_scheme_index();
+                index++;
+                if (index >= NUMBER_OF_SCHEMES)
+                    index = 0;
+
+                set_game_palette(index);
+            }
+
+        }
+        last_home = button_states[BUTTON_HOME];
+        last_left = button_states[BUTTON_LEFT];
+        last_right = button_states[BUTTON_RIGHT];
+
         // Poll controller occasionally
 #if ENABLE_PIO_DMG_BUTTONS
         (void)nes_classic_controller();
         pio_sm_put(pio_dmg_buttons, dmg_buttons_sm, pio_buttons_out_value);
 #endif
-#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
-        if (nes_classic_controller()) 
-        {
-            // pio_sm_put(pio_dmg_simple, dmg_sm, pio_buttons_out_value);
-            pio_sm_put(pio_dmg_buttons_simple, dmg_buttons_simple_sm, pio_buttons_simple_out_value);
-        }
-#endif
+
 #if ENABLE_CPU_DMG_BUTTONS
         nes_classic_controller();
 #endif
@@ -679,12 +735,10 @@ static void initialize_dmg_buttons_pio_program(void)
     static const uint start_out_pin = DMG_OUTPUT_RIGHT_A_PIN;
 
     // Get first free state machine in PIO 0
-    // dmg_sm = pio_claim_unused_sm(pio_dmg_simple, true);
     dmg_buttons_sm = pio_claim_unused_sm(pio_dmg_buttons, true);
 
     // Add PIO program to PIO instruction memory. SDK will find location and
     // return with the memory offset of the program.
-    // uint offset = pio_add_program(pio_dmg_simple, &dmg_simple_program);
     uint offset = pio_add_program(pio_dmg_buttons, &dmg_buttons_program);
 
     // Calculate the PIO clock divider
@@ -692,40 +746,10 @@ static void initialize_dmg_buttons_pio_program(void)
     float div = (float)2;
 
     // Initialize the program using the helper function in our .pio file
-    // dmg_simple_program_init(pio_dmg_simple, dmg_sm, offset, start_in_pin, start_out_pin, div);
     dmg_buttons_program_init(pio_dmg_buttons, dmg_buttons_sm, offset, start_in_pin, start_out_pin, div);
 
     // Start running our PIO program in the state machine
-    // pio_sm_set_enabled(pio_dmg_simple, dmg_sm, true);
     pio_sm_set_enabled(pio_dmg_buttons, dmg_buttons_sm, true);
-}
-#endif
-#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
-static void initialize_dmg_buttons_simple_pio_program(void)
-{
-    static const uint start_in_pin = DMG_READING_BUTTONS_PIN;
-    static const uint start_out_pin = DMG_OUTPUT_RIGHT_A_PIN;
-
-    // Get first free state machine in PIO 0
-    // dmg_sm = pio_claim_unused_sm(pio_dmg_simple, true);
-    dmg_buttons_simple_sm = pio_claim_unused_sm(pio_dmg_buttons_simple, true);
-
-    // Add PIO program to PIO instruction memory. SDK will find location and
-    // return with the memory offset of the program.
-    // uint offset = pio_add_program(pio_dmg_simple, &dmg_simple_program);
-    uint offset = pio_add_program(pio_dmg_buttons_simple, &dmg_buttons_simple_program);
-
-    // Calculate the PIO clock divider
-    // float div = (float)clock_get_hz(clk_sys) / pio_freq;
-    float div = (float)2;
-
-    // Initialize the program using the helper function in our .pio file
-    // dmg_simple_program_init(pio_dmg_simple, dmg_sm, offset, start_in_pin, start_out_pin, div);
-    dmg_buttons_simple_program_init(pio_dmg_buttons_simple, dmg_buttons_simple_sm, offset, start_in_pin, start_out_pin, div);
-
-    // Start running our PIO program in the state machine
-    // pio_sm_set_enabled(pio_dmg_simple, dmg_sm, true);
-    pio_sm_set_enabled(pio_dmg_buttons_simple, dmg_buttons_simple_sm, true);
 }
 #endif
 
@@ -894,10 +918,6 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
     uint8_t pio_report = ~((pins_dpad << 4) | (pins_other&0xF));
     pio_buttons_out_value = (uint32_t)pio_report;
 #endif
-#if ENABLE_PIO_DMG_BUTTONS_SIMPLE
-    uint8_t pio_report = ~((pins_dpad << 4) | (pins_other&0xF));
-    pio_buttons_simple_out_value = (uint32_t)pio_report;
-#endif
 
     return true;
 }
@@ -905,6 +925,14 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
 #if ENABLE_CPU_DMG_BUTTONS
 static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t events)
 {
+#if ENABLE_VIDEO_CAPTURE && USE_VSYNC_IRQ
+    // Handle VSYNC IRQ for video capture (GPIO 4) - ONLY IN IRQ MODE
+    if (gpio == VSYNC_PIN) {
+        video_capture_handle_vsync_irq(events);
+        return;  // VSYNC handled, done
+    }
+#endif
+
     // Prevent controller input to game if OSD is visible
 #if ENABLE_OSD
     if (OSD_is_enabled())
@@ -960,3 +988,17 @@ static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t eve
     }
 }
 #endif // ENABLE_CPU_DMG_BUTTONS
+
+// Palette support for both 640x480 and 800x600 modes
+static void set_game_palette(int index)
+{
+    if ((index <0) || index >= NUMBER_OF_SCHEMES)
+        return;
+
+    set_scheme_index(index);
+    game_palette_rgb888 = (uint32_t*)get_scheme();
+
+    // Set RGB888 palette pointer for 2bpp palette mode
+    // Works for both 640x480 (no borders) and 800x600 (with borders)
+    dvi_get_blank_settings(&dvi0)->palette_rgb888 = game_palette_rgb888;
+}

@@ -41,8 +41,8 @@ You need to have the Pico SDK installed, as well as a recent CMake and arm-none-
 ```bash
 mkdir build
 cd build
-PICO_SDK_PATH=path/to/sdk 
-cmake -DPICO_COPY_TO_RAM=1 ..
+# cmake -DPICO_SDK_PATH=/path/to/sdk -DPICO_PLATFORM=rp2350 -DPICO_COPY_TO_RAM=1 ..
+cmake -DPICO_SDK_PATH=/path/to/sdk -DPICO_PLATFORM=rp2040 -DPICO_COPY_TO_RAM=1 ..
 make -j$(nproc)
 ```
 Note:  on Windows I use:  

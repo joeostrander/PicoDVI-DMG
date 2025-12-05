@@ -347,11 +347,11 @@ void dvi_setup_scanline_for_active(const struct dvi_timing *t, const struct dvi_
 			// Non-repeating DMA for the freshly-encoded TMDS buffer
 			_set_data_cb(&cblist[target_block], &dma_cfg[i], tmdsbuf + i * (t->h_active_pixels / DVI_SYMBOLS_PER_WORD),
 				t->h_active_pixels / DVI_SYMBOLS_PER_WORD, 0, false);
-		}
-		else {
+		}		else {
 			// Use read ring to repeat the correct DC-balanced symbol pair on blank scanlines (4 or 8 byte period)
+			// Ring mode 2 = wrap at 4 bytes (1 word) - works for SPW=2 
 			_set_data_cb(&cblist[target_block], &dma_cfg[i], &(black ? black_scanline_tmds : empty_scanline_tmds)[2 * i / DVI_SYMBOLS_PER_WORD],
-				t->h_active_pixels / DVI_SYMBOLS_PER_WORD, DVI_SYMBOLS_PER_WORD == 2 ? 2 : 3, false);
+				t->h_active_pixels / DVI_SYMBOLS_PER_WORD, 2, false);
 		}
 	}
 }
@@ -397,12 +397,12 @@ void dvi_setup_scanline_for_active_with_audio(const struct dvi_timing *t, const 
 			// Non-repeating DMA for the freshly-encoded TMDS buffer
 			_set_data_cb(&cblist[active_block], &dma_cfg[i], tmdsbuf + i * (t->h_active_pixels / DVI_SYMBOLS_PER_WORD),
 						 t->h_active_pixels / DVI_SYMBOLS_PER_WORD, 0, false);
-		}
-		else
+		}		else
 		{
 			// Use read ring to repeat the correct DC-balanced symbol pair on blank scanlines (4 or 8 byte period)
+			// Ring mode 2 = wrap at 4 bytes (1 word) - works for SPW=2 and SPW=3
 			_set_data_cb(&cblist[active_block], &dma_cfg[i], &(black ? black_scanline_tmds : empty_scanline_tmds)[2 * i / DVI_SYMBOLS_PER_WORD],
-						 t->h_active_pixels / DVI_SYMBOLS_PER_WORD, DVI_SYMBOLS_PER_WORD == 2 ? 2 : 3, false);
+						 t->h_active_pixels / DVI_SYMBOLS_PER_WORD, 2, false);
 		}
 	}
 }
