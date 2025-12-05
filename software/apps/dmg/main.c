@@ -301,34 +301,40 @@ static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t eve
 #endif
 
 static bool __no_inline_not_in_flash_func(nes_classic_controller)(void);
-
-// static void __no_inline_not_in_flash_func(core1_scanline_callback)(void);
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline);
 
 void core1_main(void)
-{    dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
+{
+    dvi_register_irqs_this_core(&dvi0, DMA_IRQ_0);
     dvi_start(&dvi0);
-#if RESOLUTION_800x600
-    dvi_scanbuf_main_2bpp_palette(&dvi0);  // Use 2bpp packed with RGB888 palette (4× scaling + 80px borders)
-#else // 640x480
-    dvi_scanbuf_main_2bpp(&dvi0);  // Use optimized 2bpp packed encoder (4× scaling)
-#endif // RESOLUTION
+    dvi_scanbuf_main_2bpp_gameboy(&dvi0);
 
     __builtin_unreachable();
 }
 
-#if RESOLUTION_800x600
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
 {
     static uint dmg_line_idx = 0;
     
     // scanlines are 0 to 143 (Game Boy native resolution, scaled 4× vertically to 576)
-    // Plus vertical borders to reach 600 lines
-    // 144 lines x 4 = 576 game area lines
-    // 600 / 4 = 150 total scanlines
-    // we've got 6 extra lines, so center vertically by starting at line 3
-    // I believe the first two scanlines are pushed before DVI start, so offset = 1
-    int offset = 1;
+    
+#if DVI_VERTICAL_REPEAT == 4
+    // 600 lines / 4 = 150 scanlines
+    // 144 rows of pixels
+    // 150 - 144 = 6 extra lines
+    // divide by 2 to center vertically = 3
+    int offset = 3;
+#else // DVI_VERTICAL_REPEAT == 3
+    // 480 rows of pixels / 3 = 160 scanlines
+    // 144 rows of pixels
+    // 160 - 144 = 16 extra lines
+    // divide by 2 to center vertically = 8
+    int offset = 8;
+#endif
+
+    // Note:  First two scanlines are pushed before DVI start, so subtract 2 from offset
+    offset -= 2;
+
     if ((scanline < offset) || (scanline >= (DMG_PIXELS_Y+offset)))
     {
         // Beyond game area - fill with black (all bits set = 0xFF for each pixel pair)
@@ -360,41 +366,6 @@ static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline
     while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
     ;
 }
-#else // 640x480
-static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
-{
-    static uint dmg_line_idx = 0;
-    
-    // scanlines are 0 to 143 (Game Boy native resolution, scaled 3× vertically to 432)
-    if (scanline >= DMG_PIXELS_Y)
-    {
-        // Beyond game area - fill with black (all bits set = 0xFF for each pixel pair)
-        // In 2bpp packed format: 0xFF = all pixels are value 3 (black)
-        memset(line_buffer, 0xFF, sizeof(line_buffer));
-        dmg_line_idx = 0;
-    }
-    else 
-    {
-        dmg_line_idx = scanline;
-        
-        const uint8_t* packed_fb = (const uint8_t*)packed_display_ptr;
-        if (packed_fb != NULL) {
-            const uint8_t* packed_line = packed_fb + (dmg_line_idx * DMG_PIXELS_X / 4);  // 40 bytes per line
-            
-            // Simply copy the packed 2bpp data directly!
-            // No unpacking, no palette lookup, no scaling - the TMDS encoder handles everything
-            memcpy(line_buffer, packed_line, sizeof(line_buffer));  // Copy 40 bytes
-        } else {
-            // No frame yet, fill with black
-            memset(line_buffer, 0xFF, sizeof(line_buffer));
-        }
-    }    const uint32_t *bufptr = (uint32_t*)line_buffer;
-    queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
-    
-    while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
-    ;
-}
-#endif // RESOLUTION
 
 // Initialize frame blending lookup tables for ultra-fast processing
 // Called once at startup to precompute all 256×256 byte combinations

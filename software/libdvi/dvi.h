@@ -100,8 +100,7 @@ void dvi_wait_for_valid_line(struct dvi_inst *inst);
 // TMDS encode it, and pass it to the tmds valid queue.
 void dvi_scanbuf_main_8bpp(struct dvi_inst *inst);
 void dvi_scanbuf_main_16bpp(struct dvi_inst *inst);
-void dvi_scanbuf_main_2bpp_640x480(struct dvi_inst *inst);  // 2bpp packed for 640x480 (SPW=2, 4× scaling, optional RGB888 palette)
-void dvi_scanbuf_main_2bpp_800x600(struct dvi_inst *inst);  // 2bpp packed for 800x600 (SPW=2, 4× scaling + 80px borders, RGB888 palette)
+void dvi_scanbuf_main_2bpp_gameboy(struct dvi_inst *inst);
 
 // Same as above, but each q_colour_valid entry is a framebuffer
 void dvi_framebuf_main_8bpp(struct dvi_inst *inst);
