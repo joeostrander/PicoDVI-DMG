@@ -73,6 +73,8 @@ static const int hdmi_n[6] = {4096, 6272, 6144, 3136, 4096, 6144};  // 32k, 44.1
 static uint16_t rate = SAMPLE_FREQ;
 // #define AUDIO_BUFFER_SIZE   (0x1<<8) // Must be power of 2
 audio_sample_t audio_buffer[AUDIO_BUFFER_SIZE];
+
+#define PIN_AUDIO_IN    28 // ADC2
 #endif
 
 #define DEBUG_BUTTON_PRESS   // Illuminate LED on button presses
@@ -266,7 +268,7 @@ uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
 // configuration
 const struct analog_microphone_config mic_config = {
     // GPIO to use for input, must be ADC compatible (GPIO 26 - 28)
-    .gpio = 28,
+    .gpio = PIN_AUDIO_IN,
 
     // bias voltage of microphone in volts
     .bias_voltage = 0,
