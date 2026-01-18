@@ -15,6 +15,7 @@ struct analog_microphone_config {
     float bias_voltage;
     uint sample_rate;
     uint sample_buffer_size;
+    int dma_irq; // DMA_IRQ_x to use, -1 = default
 };
 
 int analog_microphone_init(const struct analog_microphone_config* config);

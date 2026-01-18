@@ -8,6 +8,13 @@
 #include "util_queue_u32_inline.h"
 #include "data_packet.h"
 
+// Enable to route the DVI DMA IRQ through the shared DMA dispatcher (for coexisting
+// users on the same IRQ line). Default OFF because DVI timing is extremely tight;
+// leave at 0 to keep DVI on an exclusive DMA IRQ handler.
+#ifndef DVI_USE_SHARED_DMA_IRQ
+#define DVI_USE_SHARED_DMA_IRQ 0
+#endif
+
 #define TMDS_SYNC_LANE  0 // blue!
 #ifndef TMDS_CHANNELS
     #define TMDS_CHANNELS   3
@@ -100,7 +107,6 @@ void dvi_wait_for_valid_line(struct dvi_inst *inst);
 // TMDS encode it, and pass it to the tmds valid queue.
 void dvi_scanbuf_main_8bpp(struct dvi_inst *inst);
 void dvi_scanbuf_main_16bpp(struct dvi_inst *inst);
-void dvi_scanbuf_main_2bpp_gameboy(struct dvi_inst *inst);
 
 // Same as above, but each q_colour_valid entry is a framebuffer
 void dvi_framebuf_main_8bpp(struct dvi_inst *inst);

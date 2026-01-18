@@ -12,9 +12,21 @@
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+#include "hardware/regs/intctrl.h"
 #include "shared_dma_handler.h"
 #include <stdio.h>
 #include "analog_microphone.h"
+
+// SDK compatibility: RP2350 adds DMA IRQ2/IRQ3 but the helper functions may be absent.
+#if PICO_RP2350
+static inline void dma_channel_set_irq3_enabled_compat(uint channel, bool enabled)
+{
+    if (enabled)
+        dma_hw->inte3 |= (1u << channel);
+    else
+        dma_hw->inte3 &= ~(1u << channel);
+}
+#endif
 
 #define ANALOG_RAW_BUFFER_COUNT 2
 
@@ -28,7 +40,7 @@ static struct {
     volatile int raw_buffer_read_index;
     uint buffer_size;
     int16_t bias;
-    uint dma_irq;
+    int dma_irq;
     analog_samples_ready_handler_t samples_ready_handler;
 } analog_mic;
 
@@ -64,26 +76,27 @@ int analog_microphone_init(const struct analog_microphone_config* config) {
     
     // Store in global for shared handler
     audio_dma_chan = analog_mic.dma_channel;
-    audio_dma_chan = analog_mic.dma_channel; // Export DMA channel for audio
     if (!SHARED_DMA_RegisterCallback(audio_dma_chan, analog_dma_handler))
     {
-        printf("ERROR: Failed to register DMA callback for channel %d\n", audio_dma_chan);
+        printf("ERROR: Failed to register DMA callback for channel %d (shared handler not initialized yet?)\n", audio_dma_chan);
         analog_microphone_deinit();
         return -1;
     }
     printf("Registered DMA callback for channel: %d\n", audio_dma_chan);
     
 
-    float clk_div = (clock_get_hz(clk_adc) / (1.0 * config->sample_rate)) - 1;    dma_channel_config dma_channel_cfg = dma_channel_get_default_config(analog_mic.dma_channel);
+    float clk_div = (clock_get_hz(clk_adc) / (1.0 * config->sample_rate)) - 1;    
+    dma_channel_config dma_channel_cfg = dma_channel_get_default_config(analog_mic.dma_channel);
 
     channel_config_set_transfer_data_size(&dma_channel_cfg, DMA_SIZE_16);
     channel_config_set_read_increment(&dma_channel_cfg, false);
     channel_config_set_write_increment(&dma_channel_cfg, true);
     channel_config_set_dreq(&dma_channel_cfg, DREQ_ADC);
-    // Set high priority for audio DMA to ensure samples don't get dropped
-    channel_config_set_high_priority(&dma_channel_cfg, true);
+    // Keep audio DMA lower priority so video DMA can complete without being starved
+    channel_config_set_high_priority(&dma_channel_cfg, false);
 
-    analog_mic.dma_irq = DMA_IRQ_1;
+    // Normalize the DMA IRQ (in case caller used -1 for default)
+    analog_mic.dma_irq = (config->dma_irq >= 0) ? config->dma_irq : DMA_IRQ_1;
 
     dma_channel_configure(
         analog_mic.dma_channel,
@@ -133,16 +146,15 @@ int analog_microphone_start()
     // irq_set_enabled(analog_mic.dma_irq, true);
     // irq_set_exclusive_handler(analog_mic.dma_irq, analog_dma_handler);
 
-    if (analog_mic.dma_irq == DMA_IRQ_0) 
-    {
+    if (analog_mic.dma_irq == DMA_IRQ_0) {
         dma_channel_set_irq0_enabled(analog_mic.dma_channel, true);
-    } 
-    else if (analog_mic.dma_irq == DMA_IRQ_1) 
-    {
+    } else if (analog_mic.dma_irq == DMA_IRQ_1) {
         dma_channel_set_irq1_enabled(analog_mic.dma_channel, true);
-    } 
-    else 
-    {
+#if PICO_RP2350
+    } else if (analog_mic.dma_irq == DMA_IRQ_3) {
+        dma_channel_set_irq3_enabled_compat(analog_mic.dma_channel, true);
+#endif
+    } else {
         return -1;
     }
 
@@ -169,6 +181,10 @@ void analog_microphone_stop() {
         dma_channel_set_irq0_enabled(analog_mic.dma_channel, false);
     } else if (analog_mic.dma_irq == DMA_IRQ_1) {
         dma_channel_set_irq1_enabled(analog_mic.dma_channel, false);
+#if PICO_RP2350
+    } else if (analog_mic.dma_irq == DMA_IRQ_3) {
+        dma_channel_set_irq3_enabled_compat(analog_mic.dma_channel, false);
+#endif
     }
 
     irq_set_enabled(analog_mic.dma_irq, false);
@@ -182,6 +198,10 @@ static void __no_inline_not_in_flash_func(analog_dma_handler)(void)
         dma_hw->ints0 = (1u << analog_mic.dma_channel);
     } else if (analog_mic.dma_irq == DMA_IRQ_1) {
         dma_hw->ints1 = (1u << analog_mic.dma_channel);
+#if PICO_RP2350
+    } else if (analog_mic.dma_irq == DMA_IRQ_3) {
+        dma_hw->ints3 = (1u << analog_mic.dma_channel);
+#endif
     }
 
     // get the next capture index to send the dma to start

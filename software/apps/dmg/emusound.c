@@ -4,7 +4,15 @@
 #include "pico/stdlib.h"
 #include <stdio.h>
 #include "hardware/irq.h"
-
+#include "hardware/timer.h"
+// Map timer IRQ across RP2040/RP2350 naming
+#if defined(TIMER_IRQ_0)
+#define AUDIO_TIMER_IRQ TIMER_IRQ_0
+#elif defined(TIMER0_IRQ_0)
+#define AUDIO_TIMER_IRQ TIMER0_IRQ_0
+#else
+#define AUDIO_TIMER_IRQ -1
+#endif
 #include "hardware/clocks.h"
 #include "pico/sync.h"
 
@@ -15,41 +23,35 @@
 #define TEST_WITH_SINE_WAVE 0
 
 static bool __time_critical_func(audio_timer_callback)(__unused repeating_timer_t* rt);
+static void __time_critical_func(audio_service_tick)(void);
 
 semaphore_t timer_sem;
 
-// 
-
-// #define SAMPLE_FREQ   32000
-
-// static const uint16_t NUMSAMPLES = (SAMPLE_FREQ / 50); // samples in 50th of second
-
-// static uint16_t soundBuffer16[NUMSAMPLES << 2]; // Effectively two stereo buffers
-// static uint16_t* soundBuffer2 = &soundBuffer16[NUMSAMPLES << 1];
 
 static volatile bool first = true;   // True if the first buffer is playing
 static bool genSound = false;
 
 static void beginAudio(void);
 
-#define TWOFIVEHZMS   40    // ms between 25 HZ ticks
-#define FIFTYHZMS   20    // ms between 50 HZ ticks
+#define TWOFIVEHZMS     40    // ms between 25 HZ ticks
+#define FIFTYHZMS       20    // ms between 50 HZ ticks
 #define ONEHUNDRDHZMS   10    // ms between 100 HZ ticks
 #define TWOHUNDRDHZMS   5    // ms between 200 HZ ticks
-#define FIVEHUNDRDHZMS   2    // ms between 500 HZ ticks
-#define TICKMS      2     // ms ticks to service hdmi audio ring buffer
-// #define TICKCOUNT   (TWOFIVEHZMS/TICKMS)  // number of ring buffer ticks per 50Hz tick
-#define TICKCOUNT   (FIFTYHZMS/TICKMS)  // number of ring buffer ticks per 50Hz tick
-// #define TICKCOUNT   (FIVEHUNDRDHZMS/TICKMS)  // number of ring buffer ticks per 200Hz tick
-// #define TICKCOUNT   (TWOHUNDRDHZMS/TICKMS)  // number of ring buffer ticks per 200Hz tick
-// #define TICKCOUNT   (ONEHUNDRDHZMS/TICKMS)  // number of ring buffer ticks per 100Hz tick
-#define TICK_SAMPLES        (NUMSAMPLES / TICKCOUNT)
+#define FIVEHUNDRDHZMS  2    // ms between 500 HZ ticks
+#define TICKMS          4     // ms ticks to service hdmi audio ring buffer
+//#define TICKCOUNT       (TWOFIVEHZMS/TICKMS)  // number of ring buffer ticks per 50Hz tick
+#define TICKCOUNT       (FIFTYHZMS/TICKMS)  // number of ring buffer ticks per 50Hz tick
+// #define TICKCOUNT       (FIVEHUNDRDHZMS/TICKMS)  // number of ring buffer ticks per 200Hz tick
+// #define TICKCOUNT       (TWOHUNDRDHZMS/TICKMS)  // number of ring buffer ticks per 200Hz tick
+// #define TICKCOUNT       (ONEHUNDRDHZMS/TICKMS)  // number of ring buffer ticks per 100Hz tick
+#define TICK_SAMPLES    (NUMSAMPLES / TICKCOUNT)
 
 repeating_timer_t audio_timer;
 audio_ring_t* ring;
-int16_t* samples; // JOE ADDED
+int16_t* samples;
 audio_sample_t* hdmi_buffer;
 int hdmi_buffer_size;
+static bool audio_manual_mode = false;  // When true, caller drives ticks instead of repeating timer
 
 #ifdef TIME_SPARE
 int32_t sound_count = 0;
@@ -73,6 +75,16 @@ void emu_sndInit(bool playSound, bool reset, audio_ring_t* audio_ring, int16_t* 
   beginAudio();
 }
 
+void emu_audio_set_manual_tick(bool manual_mode)
+{
+    audio_manual_mode = manual_mode;
+}
+
+void emu_audio_manual_tick(void)
+{
+    audio_service_tick();
+}
+
 const int16_t sine[32] = {
     0x8000,0x98f8,0xb0fb,0xc71c,0xda82,0xea6d,0xf641,0xfd89,
     0xffff,0xfd89,0xf641,0xea6d,0xda82,0xc71c,0xb0fb,0x98f8,
@@ -82,21 +94,27 @@ const int16_t sine[32] = {
 
 static bool __time_critical_func(audio_timer_callback)(__unused repeating_timer_t* rt)
 {
+  audio_service_tick();
+  return true;
+}
+
+static void __time_critical_func(audio_service_tick)(void)
+{
     static uint32_t call_count = 0;
     static uint32_t debug_counter = 0;
     
     // Process chunk of samples from ADC double-buffer
     // ADC fills one buffer while we read from the other
-    // IMPORTANT: Always process exactly TICK_SAMPLES (64), never more!
-    // The ADC buffer is only 64 samples, so we can't read beyond that.
+    // IMPORTANT: Always process exactly TICK_SAMPLES (128), never more!
+    // The ADC buffer is only TICK_SAMPLES, so we can't read beyond that.
     
     int size = get_write_size(ring, true);
     if (size >= TICK_SAMPLES)
     {
         int audio_offset = get_write_offset(ring);
         
-        // ALWAYS process exactly 64 samples - no doubling!
-        // Our ADC buffer is only 64 samples, reading more would be garbage data
+        // ALWAYS process exactly TICK_SAMPLES - no doubling!
+        // Our ADC buffer is only TICK_SAMPLES deep, reading more would be garbage data
         size = TICK_SAMPLES;
           // DEBUG: Print detailed audio info every 1000 callbacks
         int32_t debug_capture_value = 0;
@@ -106,7 +124,7 @@ static bool __time_critical_func(audio_timer_callback)(__unused repeating_timer_
         //     printf("Audio: ADC[0]=%d, ADC[32]=%d | ", adc_0, adc_32);
         // }
         
-        // Process chunk of samples (exactly 64 samples)
+        // Process chunk of samples (exactly TICK_SAMPLES)
         for (int c = 0; c < size; c++)
         {
 #if TEST_WITH_SINE_WAVE
@@ -140,7 +158,6 @@ static bool __time_critical_func(audio_timer_callback)(__unused repeating_timer_
         sem_release(&timer_sem);
     }
 
-    return true;
 }
 
 static void beginAudio(void)
@@ -155,8 +172,21 @@ static void beginAudio(void)
     hdmi_buffer_size = ring->size;
 
     // Use CPU timer for audio chunking
-    printf("Initializing CPU timer for audio chunking at %d ms intervals...\n", TICKMS);
-    add_repeating_timer_ms(-TICKMS, audio_timer_callback, NULL, &audio_timer);
+    if (!audio_manual_mode) 
+    {
+        printf("Initializing CPU timer for audio chunking at %d ms intervals...\n", TICKMS);
+        add_repeating_timer_ms(-TICKMS, audio_timer_callback, NULL, &audio_timer);
+
+        // Lower timer IRQ priority so VSYNC GPIO (IO_IRQ_BANK0) wins
+        if (AUDIO_TIMER_IRQ >= 0) 
+        {
+          irq_set_priority(AUDIO_TIMER_IRQ, 0xC0);
+        }
+    } 
+    else 
+    {
+        printf("Audio manual-tick mode enabled; no repeating timer started\n");
+    }
 
     printf("sound initialized\n");
   }
