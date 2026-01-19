@@ -1,8 +1,18 @@
 # PicoDVI-DMG  
 
-## This project allows Gameboy DMG DVI output via HDMI using PicoDVI
+## Output Gameboy DMG video and audio via HDMI
+
+Also see the emulator version:  
+https://github.com/joeostrander/PicoDVI-DMG_EMU 
 
 --- 
+Update 2026.01.18
+ - Moved audio to core1 (where libdvi runs)
+ - Performance enhancements
+ - Fixed glitches
+ - Save preferences
+ - New PCB coming soon
+
 Update 2025.12.05
  - 2 resolution options available (see CMakeLists.txt) 
  - Selectable schemes with Select+left/right
