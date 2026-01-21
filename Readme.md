@@ -6,6 +6,9 @@ Also see the emulator version:
 https://github.com/joeostrander/PicoDVI-DMG_EMU 
 
 --- 
+Update 2026.01.20
+ - Added the On-Screen Display
+
 Update 2026.01.18
  - Moved audio to core1 (where libdvi runs)
  - Performance enhancements
@@ -34,6 +37,8 @@ Update 2025.11.24
 ![dmg theme](./images/preview_dmg.jpg?raw=true)  
 
 ![gbp theme](./images/preview_gbp.jpg?raw=true)  
+
+![osd](./images/osd.jpg?raw=true)  
 
 
 

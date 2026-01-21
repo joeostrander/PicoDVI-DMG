@@ -9,6 +9,7 @@ add_executable(dmg
     shared_dma_handler.c
     colors.c
     eeprom.c
+    osd.c
 )
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})

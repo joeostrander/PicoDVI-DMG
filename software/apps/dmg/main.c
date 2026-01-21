@@ -78,6 +78,8 @@ make improved OSD
 #include "emusound.h"
 #include "colors.h"
 #include "mario.h"
+#include "video_defs.h"
+#include "osd.h"
 
 #include "video_capture.pio.h"  // PIO-based video capture
 #include "shared_dma_handler.h"
@@ -86,7 +88,7 @@ make improved OSD
 
 #define ENABLE_AUDIO                1  // Set to 1 to enable audio, 0 to disable all audio code
 #define ENABLE_VIDEO_CAPTURE        1
-#define ENABLE_OSD                  0  // Set to 1 to enable OSD code, 0 to disable (TODO)
+#define ENABLE_OSD                  1  // Set to 1 to enable OSD code, 0 to disable (TODO)
 #define AUDIO_ON_CORE1              1  // Route audio tick work to Core 1 alongside DVI
 #define BIT_IS_CLEAR(value, bit)    (((value) & (1U << (bit))) == 0)
 
@@ -125,10 +127,6 @@ audio_sample_t audio_buffer[AUDIO_BUFFER_SIZE];
 #define I2C_ADDRESS                     0x52
 i2c_inst_t* i2cHandle = i2c1;
 
-#define DMG_PIXELS_X                160
-#define DMG_PIXELS_Y                144
-#define DMG_PIXEL_COUNT             (DMG_PIXELS_X*DMG_PIXELS_Y)
-
 #define SPLASH_DURATION_MS          3000u
 
 //********************************************************************************
@@ -147,6 +145,18 @@ typedef enum
     BUTTON_HOME,
     BUTTON_COUNT
 } controller_button_t;
+
+typedef enum
+{
+    OSD_LINE_COLOR_SCHEME = 0,
+    // OSD_LINE_BORDER_COLOR,
+    OSD_LINE_FRAMEBLENDING,
+    // OSD_LINE_RESET_GAMEBOY,
+    OSD_LINE_RESET_DEVICE,
+    OSD_LINE_SAVE_SETTINGS,
+    OSD_LINE_EXIT,
+    OSD_LINE_COUNT
+} osd_line_t;
 
 typedef enum
 {
@@ -257,7 +267,6 @@ const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
         (((_b) & 0xC0) >>  6)        \
     )
 
-#define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 
 struct dvi_inst dvi0;
 
@@ -330,6 +339,8 @@ int16_t sample_buffer_for_audio[ADC_CHUNK_SIZE];
 
 static volatile bool dma_irq_ready_core1 = false;
 
+static restart_option_t restart_option = RESTART_NORMAL;
+
 //********************************************************************************
 // PRIVATE FUNCTION PROTOTYPES
 //********************************************************************************
@@ -345,7 +356,7 @@ static bool button_was_released(controller_button_t button);
 static bool command_check(void);
 static void button_state_save_previous(void);
 static void reset_button_states(void);
-static void save_and_restart(void);
+static void save_settings(void);
 static void reset_pico(restart_option_t restart_option);
 static void load_settings(void);
 static void boot_checkpoint(const char *label);
@@ -357,7 +368,7 @@ static void on_analog_samples_ready(void);
 #endif // ENABLE_AUDIO
 
 static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t events);
-
+static void update_osd(void);
 
 //********************************************************************************
 // PRIVATE FUNCTIONS
@@ -728,57 +739,88 @@ static bool command_check(void)
         {
             result = true;
             printf("Hotkey: SELECT+START\n");
-            frameblending_enabled = !frameblending_enabled;
-            printf("Frame blending: %s\n", frameblending_enabled ? "ENABLED" : "DISABLED");
-            if (!frameblending_enabled) {
-                // Clear previous frame buffer when disabling
-                memset(packed_buffer_previous, 0x00, PACKED_FRAME_SIZE);  // 0x00 = all white pixels
-            }
-        }
-
-        // SELECT + HOME - TODO: Change to OSD menu
-        if (button_was_released(BUTTON_HOME))
-        {
-            result = true;
-            printf("Hotkey: HOME\n");
-            frameblending_enabled = !frameblending_enabled;
-            printf("Frame blending: %s\n", frameblending_enabled ? "ENABLED" : "DISABLED");
-            if (!frameblending_enabled) {
-                // Clear previous frame buffer when disabling
-                memset(packed_buffer_previous, 0x00, PACKED_FRAME_SIZE);  // 0x00 = all white pixels
-            }
-        }
-
-        // SELECT + (LEFT OR RIGHT) - change color scheme
-        int scheme_index = get_scheme_index();
-        if (button_was_released(BUTTON_LEFT))
-        {
-            set_game_palette(--scheme_index);
-            result = true;
-        }
-        if (button_was_released(BUTTON_RIGHT))
-        {
-            set_game_palette(++scheme_index);
-            result = true;
-        }
-
-        // SELECT + DOWN - save settings
-        if (button_was_released(BUTTON_DOWN))
-        {
-            save_and_restart();
-            result = true;
+            OSD_toggle();
         }
     }
     else
     {
-#if HOME_RESETS_TO_BOOTLOADER
-        // HOME - reset into USB mass storage mode for easier programming
+        // select not pressed
+
         if (button_was_released(BUTTON_HOME))
         {
             result = true;
+#if HOME_RESETS_TO_BOOTLOADER
+            // HOME - reset into USB mass storage mode for easier programming
             reset_pico(RESTART_MASS_STORAGE);
-        }
+#else
+            OSD_toggle();
 #endif
+        }
+        else
+        {
+            if (OSD_is_enabled())
+            {
+                if (button_was_released(BUTTON_DOWN))
+                {
+                    result = true;
+                    OSD_change_active_line(1);
+                }
+                else if (button_was_released(BUTTON_UP))
+                {
+                    result = true;
+                    OSD_change_active_line(-1);
+                }
+                else if (button_was_released(BUTTON_RIGHT) 
+                        || button_was_released(BUTTON_LEFT)
+                        || button_was_released(BUTTON_A))
+                {
+                    result = true;
+                    controller_button_t button = button_was_released(BUTTON_A) ? BUTTON_A : button_was_released(BUTTON_RIGHT) ? BUTTON_RIGHT : BUTTON_LEFT;
+                    switch (OSD_get_active_line())
+                    {
+                        case OSD_LINE_COLOR_SCHEME:
+                            set_game_palette(button == BUTTON_RIGHT ? get_scheme_index() + 1 : get_scheme_index() - 1);
+                            update_osd();
+                            break;
+                        case OSD_LINE_FRAMEBLENDING:
+                            frameblending_enabled = !frameblending_enabled;
+                            printf("Frame blending: %s\n", frameblending_enabled ? "ENABLED" : "DISABLED");
+                            if (!frameblending_enabled) {
+                                // Clear previous frame buffer when disabling
+                                memset(packed_buffer_previous, 0x00, PACKED_FRAME_SIZE);  // 0x00 = all white pixels
+                            }
+
+                            update_osd();
+                            break;
+                        // case OSD_LINE_RESET_GAMEBOY:
+                        //     gameboy_reset();
+                        //     break;
+                        case OSD_LINE_RESET_DEVICE:
+                            if (button == BUTTON_A)
+                            {
+                                reset_pico(restart_option);
+                            }
+                            else
+                            {
+                                restart_option = restart_option == RESTART_NORMAL ? RESTART_MASS_STORAGE : RESTART_NORMAL;
+                                update_osd();
+                            }
+                            break;
+                        case OSD_LINE_SAVE_SETTINGS:
+                            save_settings();
+                            break;
+                        case OSD_LINE_EXIT:
+                            OSD_toggle();
+                            break;
+                    }
+                }
+                else if (button_was_released(BUTTON_B))
+                {
+                    result = true;
+                    OSD_toggle();
+                }
+            }
+        }
     }
 
     return result;
@@ -801,7 +843,7 @@ static void reset_button_states(void)
     }
 }
 
-static void save_and_restart(void)
+static void save_settings(void)
 {
     eeprom_result_t result;
     result = EEPROM_write(SAVE_INDEX_SCHEME, get_scheme_index());
@@ -1004,6 +1046,31 @@ static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t eve
     }
 }
 
+static void update_osd(void)
+{
+    char buff[32];
+    sprintf(buff, "COLOR SCHEME:%8d", get_scheme_index());
+    OSD_set_line_text(OSD_LINE_COLOR_SCHEME, buff);
+
+    // sprintf(buff, "BORDER COLOR:%8d", get_border_color_index());
+    // OSD_set_line_text(OSD_LINE_BORDER_COLOR, buff);
+
+
+    // OSD_set_line_text(OSD_LINE_RESET_GAMEBOY, "RESET GAMEBOY");
+
+    sprintf(buff, "FRAME BLEND:%9s", frameblending_enabled ? "ON" : "OFF");
+    OSD_set_line_text(OSD_LINE_FRAMEBLENDING, buff);
+    
+    sprintf(buff, "RESET DEVICE:%8s", restart_option == RESTART_MASS_STORAGE ? "USB" : "NORM");
+    OSD_set_line_text(OSD_LINE_RESET_DEVICE, buff);
+
+    OSD_set_line_text(OSD_LINE_SAVE_SETTINGS, "SAVE SETTINGS");
+
+    OSD_set_line_text(OSD_LINE_EXIT, "EXIT");
+
+    // OSD_render(???);
+}
+
 //********************************************************************************
 // PUBLIC FUNCTIONS
 //********************************************************************************
@@ -1042,6 +1109,11 @@ int main(void)
     // Both modes use packed buffer directly (TMDS encoder handles palette and scaling)
     packed_display_ptr = packed_buffer_0;
     // TODO packed_render_ptr = packed_buffer_1;
+
+    // Initialize OSD overlays (disabled by default)
+    OSD_init(DMG_PIXELS_X, DMG_PIXELS_Y);
+    OSD_clear();
+    OSD_set_enabled(false);
 
     dvi0.timing = &DVI_TIMING;
     dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
@@ -1195,6 +1267,8 @@ int main(void)
     absolute_time_t splash_until = delayed_by_ms(get_absolute_time(), SPLASH_DURATION_MS);
     bool splash_done = false;
 
+    update_osd();
+
     // Main loop - PIO video + good audio
     while (true) 
     {
@@ -1275,6 +1349,9 @@ int main(void)
                     }
                 }
     
+                // Overlay OSD text, if enabled
+                OSD_render((uint8_t*)completed_packed);
+
                 // Swap display buffer to the completed frame (packed 2bpp)
                 __dmb();
                 packed_display_ptr = (volatile uint8_t*)completed_packed;
