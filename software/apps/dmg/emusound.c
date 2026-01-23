@@ -30,6 +30,9 @@ semaphore_t timer_sem;
 
 static volatile bool first = true;   // True if the first buffer is playing
 static bool genSound = false;
+static float audio_gain = 1.0f;
+static float lp_alpha = 1.0f;        // 1.0f => no filtering
+static float lp_state = 0.0f;        // filter memory
 
 static void beginAudio(void);
 
@@ -85,6 +88,33 @@ void emu_audio_manual_tick(void)
     audio_service_tick();
 }
 
+void emu_audio_set_gain(float gain)
+{
+  // Clamp to a sane positive range to avoid runaway clipping
+  if (gain < 0.0f) {
+    gain = 0.0f;
+  }
+  if (gain > 16.0f) {
+    gain = 16.0f;
+  }
+  audio_gain = gain;
+}
+
+void emu_audio_set_lowpass(float cutoff_hz)
+{
+  if (cutoff_hz <= 0.0f) {
+    lp_alpha = 1.0f; // disable filtering
+    return;
+  }
+  // Single-pole LPF: alpha = dt / (RC + dt), RC = 1/(2*pi*fc)
+  const float dt = 1.0f / (float)SAMPLE_FREQ;
+  const float rc = 1.0f / (6.2831853f * cutoff_hz);
+  float alpha = dt / (rc + dt);
+  if (alpha < 0.0f) alpha = 0.0f;
+  if (alpha > 1.0f) alpha = 1.0f;
+  lp_alpha = alpha;
+}
+
 const int16_t sine[32] = {
     0x8000,0x98f8,0xb0fb,0xc71c,0xda82,0xea6d,0xf641,0xfd89,
     0xffff,0xfd89,0xf641,0xea6d,0xda82,0xc71c,0xb0fb,0x98f8,
@@ -133,14 +163,25 @@ static void __time_critical_func(audio_service_tick)(void)
 #else
             // ADC is 12-bit (0-4095), convert to 16-bit signed (-32768 to 32767)
             int32_t capture_value = ((int32_t)((uint16_t)samples[c]) << 4) - 32768;
+            // Apply software gain with saturation
+            int32_t scaled = (int32_t)(capture_value * audio_gain);
+            if (scaled > INT16_MAX) scaled = INT16_MAX;
+            if (scaled < INT16_MIN) scaled = INT16_MIN;
+
+            // Optional single-pole low-pass to reduce hiss; lp_alpha==1 => bypass
+            float filtered_f = (lp_state + lp_alpha * ((float)scaled - lp_state));
+            lp_state = filtered_f;
+            int32_t filtered = (int32_t)filtered_f;
+            if (filtered > INT16_MAX) filtered = INT16_MAX;
+            if (filtered < INT16_MIN) filtered = INT16_MIN;
             
             if (debug_counter % 1000 == 0 && c == 0) {
-                debug_capture_value = capture_value;
+              debug_capture_value = filtered;
             }
 #endif
             
-            hdmi_buffer[audio_offset].channels[0] = (int16_t)capture_value;
-            hdmi_buffer[audio_offset].channels[1] = (int16_t)capture_value;
+            hdmi_buffer[audio_offset].channels[0] = (int16_t)filtered;
+            hdmi_buffer[audio_offset].channels[1] = (int16_t)filtered;
             audio_offset = (audio_offset + 1) & (hdmi_buffer_size-1);
         }          
         

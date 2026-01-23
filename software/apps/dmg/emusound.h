@@ -25,6 +25,10 @@ uint16_t emu_SoundSampleRate(void);
 // Enable manual ticking (skip repeating timer) when true; call emu_audio_manual_tick() periodically
 void emu_audio_set_manual_tick(bool manual_mode);
 void emu_audio_manual_tick(void);
+// Apply software gain multiplier to captured audio (default 1.0f)
+void emu_audio_set_gain(float gain);
+// Enable single-pole low-pass filter; pass cutoff_hz<=0 to disable (no filtering)
+void emu_audio_set_lowpass(float cutoff_hz);
 
 
 

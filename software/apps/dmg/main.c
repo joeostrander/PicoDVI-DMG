@@ -313,7 +313,7 @@ const struct analog_microphone_config mic_config = {
     .gpio = PIN_AUDIO_IN,
 
     // bias voltage of microphone in volts
-    .bias_voltage = 0,
+    .bias_voltage = 1.65f,
 
     // sample rate in Hz - match HDMI audio
     .sample_rate = SAMPLE_FREQ,
@@ -1172,6 +1172,8 @@ int main(void)
         printf("Starting audio timer (500Hz chunk rate)...\n");
     }
 	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer_for_audio);
+    emu_audio_set_gain(6.0f);  // Boost audio volume
+    emu_audio_set_lowpass(3000.0f); // try 2–4 kHz to shave hiss
     printf("Audio system initialized\n");
     
 #endif
