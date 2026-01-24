@@ -88,7 +88,7 @@ make improved OSD
 
 #define ENABLE_AUDIO                1  // Set to 1 to enable audio, 0 to disable all audio code
 #define ENABLE_VIDEO_CAPTURE        1
-#define ENABLE_OSD                  1  // Set to 1 to enable OSD code, 0 to disable (TODO)
+#define ENABLE_OSD                  1  // Set to 1 to enable OSD code, 0 to disable
 #define AUDIO_ON_CORE1              1  // Route audio tick work to Core 1 alongside DVI
 #define BIT_IS_CLEAR(value, bit)    (((value) & (1U << (bit))) == 0)
 
@@ -150,7 +150,7 @@ typedef enum
 {
     OSD_LINE_COLOR_SCHEME = 0,
     // OSD_LINE_BORDER_COLOR,
-    OSD_LINE_FRAMEBLENDING,
+    OSD_LINE_FRAME_BLENDING,
     // OSD_LINE_RESET_GAMEBOY,
     OSD_LINE_RESET_DEVICE,
     OSD_LINE_SAVE_SETTINGS,
@@ -191,8 +191,6 @@ typedef enum
 // Packed DMA buffers - 4 pixels per byte (2 bits each)
 // This is the native format from the Game Boy (2 bits per pixel)
 // Used by BOTH 640x480 and 800x600 modes for DMA capture AND display
-#define PACKED_FRAME_SIZE (DMG_PIXEL_COUNT / 4)  // 5760 bytes (160×144 ÷ 4)
-#define PACKED_LINE_STRIDE_BYTES (DMG_PIXELS_X / 4)
 static uint8_t packed_buffer_0[PACKED_FRAME_SIZE] = {0};
 static uint8_t packed_buffer_1[PACKED_FRAME_SIZE] = {0};
 static uint8_t packed_buffer_previous[PACKED_FRAME_SIZE] = {0};  // For frame blending
@@ -205,7 +203,7 @@ static volatile uint8_t* packed_display_ptr = packed_buffer_0;
 // static uint8_t* packed_render_ptr = packed_buffer_1;
 
 // Frame blending - blends previous frame with current for sprite overlay effects
-static volatile bool frameblending_enabled = false;
+static volatile bool frame_blending_enabled = false;
 
 // Frame blending lookup tables for ultra-fast processing
 // Precomputed lookup table for brightening effect (256 bytes)
@@ -360,7 +358,7 @@ static void save_settings(void);
 static void reset_pico(restart_option_t restart_option);
 static void load_settings(void);
 static void boot_checkpoint(const char *label);
-static void __no_inline_not_in_flash_func(prepare_scanline_2bpp_gameboy_local)(struct dvi_inst *inst, const uint8_t *packed_scanbuf);
+static void __no_inline_not_in_flash_func(prepare_scanline_2bpp_gameboy)(struct dvi_inst *inst, const uint8_t *packed_scanbuf);
 
 #if ENABLE_AUDIO
 static void on_analog_samples_ready(void);
@@ -390,10 +388,12 @@ static void core1_main(void)
     absolute_time_t next_audio_tick = delayed_by_ms(get_absolute_time(), AUDIO_TICK_MS);
 #endif
 
-    while (true) {
+    while (true)
+    {
         const uint8_t *scanbuf = NULL;
-        if (queue_try_remove_u32(&dvi0.q_colour_valid, (uint32_t*)&scanbuf)) {
-            prepare_scanline_2bpp_gameboy_local(&dvi0, scanbuf);
+        if (queue_try_remove_u32(&dvi0.q_colour_valid, (uint32_t*)&scanbuf))
+        {
+            prepare_scanline_2bpp_gameboy(&dvi0, scanbuf);
             queue_add_blocking_u32(&dvi0.q_colour_free, (uint32_t*)&scanbuf);
         }
 
@@ -782,10 +782,10 @@ static bool command_check(void)
                             set_game_palette(button == BUTTON_RIGHT ? get_scheme_index() + 1 : get_scheme_index() - 1);
                             update_osd();
                             break;
-                        case OSD_LINE_FRAMEBLENDING:
-                            frameblending_enabled = !frameblending_enabled;
-                            printf("Frame blending: %s\n", frameblending_enabled ? "ENABLED" : "DISABLED");
-                            if (!frameblending_enabled) {
+                        case OSD_LINE_FRAME_BLENDING:
+                            frame_blending_enabled = !frame_blending_enabled;
+                            printf("Frame blending: %s\n", frame_blending_enabled ? "ENABLED" : "DISABLED");
+                            if (!frame_blending_enabled) {
                                 // Clear previous frame buffer when disabling
                                 memset(packed_buffer_previous, 0x00, PACKED_FRAME_SIZE);  // 0x00 = all white pixels
                             }
@@ -807,10 +807,12 @@ static bool command_check(void)
                             }
                             break;
                         case OSD_LINE_SAVE_SETTINGS:
-                            save_settings();
+                            if (button == BUTTON_A)    
+                                save_settings();
                             break;
                         case OSD_LINE_EXIT:
-                            OSD_toggle();
+                            if (button == BUTTON_A)
+                                OSD_toggle();
                             break;
                     }
                 }
@@ -908,7 +910,7 @@ static void load_settings(void)
     boot_checkpoint("Settings loaded");
 
     // set_scheme_index((int)EEPROM_read(SAVE_INDEX_SCHEME));
-    // frameblending_enabled = EEPROM_read(SAVE_INDEX_FRAME_BLENDING) == 1;
+    // frame_blending_enabled = EEPROM_read(SAVE_INDEX_FRAME_BLENDING) == 1;
 }
 
 static void boot_checkpoint(const char *label)
@@ -923,8 +925,7 @@ static void boot_checkpoint(const char *label)
     uart_puts(uart1, "\n");
 }
 
-// Local copy of TMDS prep for 2bpp packed Game Boy scanlines (mirrors libdvi private helper)
-static void __no_inline_not_in_flash_func(prepare_scanline_2bpp_gameboy_local)(struct dvi_inst *inst, const uint8_t *packed_scanbuf)
+static void __no_inline_not_in_flash_func(prepare_scanline_2bpp_gameboy)(struct dvi_inst *inst, const uint8_t *packed_scanbuf)
 {
     uint32_t *tmdsbuf = NULL;
     queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
@@ -1058,8 +1059,8 @@ static void update_osd(void)
 
     // OSD_set_line_text(OSD_LINE_RESET_GAMEBOY, "RESET GAMEBOY");
 
-    sprintf(buff, "FRAME BLEND:%9s", frameblending_enabled ? "ON" : "OFF");
-    OSD_set_line_text(OSD_LINE_FRAMEBLENDING, buff);
+    sprintf(buff, "FRAME BLEND:%9s", frame_blending_enabled ? "ON" : "OFF");
+    OSD_set_line_text(OSD_LINE_FRAME_BLENDING, buff);
     
     sprintf(buff, "RESET DEVICE:%8s", restart_option == RESTART_MASS_STORAGE ? "USB" : "NORM");
     OSD_set_line_text(OSD_LINE_RESET_DEVICE, buff);
@@ -1323,7 +1324,7 @@ int main(void)
                 video_capture_started = true;
 
                 // Apply frame blending if enabled (works on packed 2bpp data)
-                if (frameblending_enabled) {
+                if (frame_blending_enabled) {
                     // Ultra-fast frame blending using precomputed lookup tables
                     // Logic from old_code.c:
                     //   - Blend: white pixels (0) OR with previous frame

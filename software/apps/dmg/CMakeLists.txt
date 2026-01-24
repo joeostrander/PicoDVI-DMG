@@ -10,6 +10,7 @@ add_executable(dmg
     colors.c
     eeprom.c
     osd.c
+    font_5x7.c
 )
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
