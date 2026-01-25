@@ -100,6 +100,11 @@ void emu_audio_set_gain(float gain)
   audio_gain = gain;
 }
 
+float emu_audio_get_gain(void)
+{
+  return audio_gain;
+}
+
 void emu_audio_set_lowpass(float cutoff_hz)
 {
   if (cutoff_hz <= 0.0f) {

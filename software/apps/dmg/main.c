@@ -151,7 +151,7 @@ typedef enum
     OSD_LINE_COLOR_SCHEME = 0,
     // OSD_LINE_BORDER_COLOR,
     OSD_LINE_FRAME_BLENDING,
-    // OSD_LINE_RESET_GAMEBOY,
+    OSD_LINE_AUDIO_GAIN,
     OSD_LINE_RESET_DEVICE,
     OSD_LINE_SAVE_SETTINGS,
     OSD_LINE_EXIT,
@@ -367,6 +367,7 @@ static void on_analog_samples_ready(void);
 
 static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t events);
 static void update_osd(void);
+static void change_audio_gain(float delta);
 
 //********************************************************************************
 // PRIVATE FUNCTIONS
@@ -792,9 +793,17 @@ static bool command_check(void)
 
                             update_osd();
                             break;
-                        // case OSD_LINE_RESET_GAMEBOY:
-                        //     gameboy_reset();
-                        //     break;
+                        case OSD_LINE_AUDIO_GAIN:
+                            if (button == BUTTON_RIGHT)
+                            {
+                                change_audio_gain(0.5f);
+                            }
+                            else
+                            {
+                                change_audio_gain(-0.5f);
+                            }
+                            update_osd();
+                            break;
                         case OSD_LINE_RESET_DEVICE:
                             if (button == BUTTON_A)
                             {
@@ -1057,7 +1066,10 @@ static void update_osd(void)
     // OSD_set_line_text(OSD_LINE_BORDER_COLOR, buff);
 
 
-    // OSD_set_line_text(OSD_LINE_RESET_GAMEBOY, "RESET GAMEBOY");
+    
+    float gain = emu_audio_get_gain();
+    sprintf(buff, "AUDIO GAIN:%10.1f", gain);
+    OSD_set_line_text(OSD_LINE_AUDIO_GAIN, buff);
 
     sprintf(buff, "FRAME BLEND:%9s", frame_blending_enabled ? "ON" : "OFF");
     OSD_set_line_text(OSD_LINE_FRAME_BLENDING, buff);
@@ -1068,8 +1080,19 @@ static void update_osd(void)
     OSD_set_line_text(OSD_LINE_SAVE_SETTINGS, "SAVE SETTINGS");
 
     OSD_set_line_text(OSD_LINE_EXIT, "EXIT");
+}
 
-    // OSD_render(???);
+static void change_audio_gain(float delta)
+{
+    float gain = emu_audio_get_gain();
+    gain += delta;
+    emu_audio_set_gain(gain);
+
+    gain = emu_audio_get_gain();  // Read back clamped value
+    char buff[32];
+    sprintf(buff, "AUDIO GAIN:%5.2f", gain);
+    OSD_set_line_text(OSD_LINE_AUDIO_GAIN, buff);
+    printf("Audio gain set to %.2f\n", gain);
 }
 
 //********************************************************************************
@@ -1173,7 +1196,7 @@ int main(void)
         printf("Starting audio timer (500Hz chunk rate)...\n");
     }
 	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer_for_audio);
-    emu_audio_set_gain(6.0f);  // Boost audio volume
+    emu_audio_set_gain(2.0f);  // Boost audio volume
     emu_audio_set_lowpass(3000.0f); // try 2–4 kHz to shave hiss
     printf("Audio system initialized\n");
     

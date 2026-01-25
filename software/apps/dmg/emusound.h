@@ -27,6 +27,7 @@ void emu_audio_set_manual_tick(bool manual_mode);
 void emu_audio_manual_tick(void);
 // Apply software gain multiplier to captured audio (default 1.0f)
 void emu_audio_set_gain(float gain);
+float emu_audio_get_gain(void);
 // Enable single-pole low-pass filter; pass cutoff_hz<=0 to disable (no filtering)
 void emu_audio_set_lowpass(float cutoff_hz);
 
