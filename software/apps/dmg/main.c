@@ -195,10 +195,7 @@ static uint8_t packed_buffer_0[PACKED_FRAME_SIZE] = {0};
 static uint8_t packed_buffer_1[PACKED_FRAME_SIZE] = {0};
 static uint8_t packed_buffer_previous[PACKED_FRAME_SIZE] = {0};  // For frame blending
 
-// Both modes now use packed buffers directly!
 // TMDS encoder handles palette conversion and horizontal scaling
-// - 640x480: 4× scaling with grayscale/color palette
-// - 800x600: 5× scaling with RGB888 palette
 static volatile uint8_t* packed_display_ptr = packed_buffer_0;
 // static uint8_t* packed_render_ptr = packed_buffer_1;
 
@@ -228,44 +225,6 @@ static uint video_offset = 0;
 static uint8_t button_states[BUTTON_COUNT];
 static uint8_t button_states_previous[BUTTON_COUNT];
 
-#if RESOLUTION_800x600
-#define FRAME_WIDTH 800
-#define FRAME_HEIGHT 150    // (x4 via DVI_VERTICAL_REPEAT)
-
-const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
-	.h_sync_polarity   = false,
-	.h_front_porch     = 44,
-	.h_sync_width      = 128,
-	.h_back_porch      = 88,
-	.h_active_pixels   = 800,
-
-	.v_sync_polarity   = false,
-	.v_front_porch     = 2,        // increased from 1
-	.v_sync_width      = 4,
-	.v_back_porch      = 22,
-	.v_active_lines    = 600,
-
-	.bit_clk_khz       = 280000
-};
-
-#define VREG_VSEL VREG_VOLTAGE_1_20
-#define DVI_TIMING dvi_timing_800x600p_60hz_280K
-#else   // 640x480
-#define FRAME_WIDTH 640
-#define FRAME_HEIGHT 160    // (×3 via DVI_VERTICAL_REPEAT = 480 lines)
-
-#define VREG_VSEL VREG_VOLTAGE_1_10  // 252 MHz is comfortable at lower voltage
-#define DVI_TIMING dvi_timing_640x480p_60hz
-#endif
-
-#define RGB888_TO_RGB332(_r, _g, _b) \
-    (                                \
-        ((_r) & 0xE0)         |      \
-        (((_g) & 0xE0) >>  3) |      \
-        (((_b) & 0xC0) >>  6)        \
-    )
-
-
 struct dvi_inst dvi0;
 
 // RGB888 palettes - shared by both 640x480 and 800x600 modes
@@ -286,23 +245,7 @@ const uint32_t palette__gbp_nso[4] = {
 
 const uint32_t* game_palette_rgb888 = palette__gbp_nso;
 
-#if RESOLUTION_800x600
-// For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
-// - Buffer contains packed 2bpp data (4 pixels per byte)
-// - 160 pixels = 40 bytes per scanline
-// - The TMDS encoder handles 4× horizontal scaling (160→640 pixels) with RGB888 palette
-// - Plus 80 pixels of horizontal borders on each side (80+640+80 = 800 pixels total)
 uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
-
-#else // 640x480
-// For 2bpp packed mode with DVI_SYMBOLS_PER_WORD=2:
-// - Buffer contains packed 2bpp data (4 pixels per byte)
-// - 160 pixels = 40 bytes per scanline
-// - The TMDS encoder handles 4× horizontal scaling (160→640 pixels)
-// - No hardware doubling needed - encoder outputs full 640 pixels!
-uint8_t line_buffer[DMG_PIXELS_X / 4] = {0};  // 40 bytes for 160 pixels packed
-
-#endif // RESOLUTION
 
 #if ENABLE_AUDIO
 // configuration
@@ -339,10 +282,24 @@ static volatile bool dma_irq_ready_core1 = false;
 
 static restart_option_t restart_option = RESTART_NORMAL;
 
+// Duplicated from tmds_encode.c
+static const __unused uint32_t __scratch_x("tmds_table") tmds_table[] = {
+#include "tmds_table.h"
+};
+
 //********************************************************************************
 // PRIVATE FUNCTION PROTOTYPES
 //********************************************************************************
 static void core1_main(void);
+static void __no_inline_not_in_flash_func(prepare_scanline_2bpp_gameboy)(struct dvi_inst *inst, const uint8_t *packed_scanbuf);
+static void __not_in_flash_func(tmds_encode_2bpp_packed_gameboy)(const uint8_t *packed_pixbuf,
+                                    uint32_t *symbuf_r,
+                                    uint32_t *symbuf_g,
+                                    uint32_t *symbuf_b,
+                                    size_t output_words,
+                                    uint32_t horizontal_repeat,
+                                    size_t input_pixels,
+                                    const uint32_t *palette_rgb888);
 static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline);
 static void init_frame_blending_luts(void);
 static void set_game_palette(int index);
@@ -358,7 +315,6 @@ static void save_settings(void);
 static void reset_pico(restart_option_t restart_option);
 static void load_settings(void);
 static void boot_checkpoint(const char *label);
-static void __no_inline_not_in_flash_func(prepare_scanline_2bpp_gameboy)(struct dvi_inst *inst, const uint8_t *packed_scanbuf);
 
 #if ENABLE_AUDIO
 static void on_analog_samples_ready(void);
@@ -409,55 +365,179 @@ static void core1_main(void)
     }
 }
 
-static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
+static void __no_inline_not_in_flash_func(prepare_scanline_2bpp_gameboy)(struct dvi_inst *inst, const uint8_t *packed_scanbuf)
 {
-    static uint dmg_line_idx = 0;
-    
-    // scanlines are 0 to 143 (Game Boy native resolution, scaled 4× vertically to 576)
-    
-#if DVI_VERTICAL_REPEAT == 4
-    // 600 lines / 4 = 150 scanlines
-    // 144 rows of pixels
-    // 150 - 144 = 6 extra lines
-    // divide by 2 to center vertically = 3
-    int offset = 3;
-#else // DVI_VERTICAL_REPEAT == 3
-    // 480 rows of pixels / 3 = 160 scanlines
-    // 144 rows of pixels
-    // 160 - 144 = 16 extra lines
-    // divide by 2 to center vertically = 8
-    int offset = 8;
-#endif
+    static uint scanline_idx = 0;
 
-    // Note:  First two scanlines are pushed before DVI start, so subtract 2 from offset
-    offset -= 2;
+    uint32_t *tmdsbuf = NULL;
+    queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
+    uint pixwidth = inst->timing->h_active_pixels;             // e.g., 800
+    uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;  // e.g., 400 when SPW=2
 
-    if ((scanline < offset) || (scanline >= (DMG_PIXELS_Y+offset)))
-    {
-        // Beyond game area - fill with black (all bits set = 0xFF for each pixel pair)
-        // In 2bpp packed format: 0xFF = all pixels are value 3 (black/darkest color in palette)
-        memset(line_buffer, 0xFF, sizeof(line_buffer));
-        dmg_line_idx = 0;
+    static const uint32_t default_palette[4] = {
+        0xb5c69c, 0x8d9c7b, 0x6c7251, 0x303820
+    };
+    const uint32_t *palette = (const uint32_t*)inst->blank_settings.palette_rgb888;
+    if (palette == NULL) {
+        palette = default_palette;
     }
+
+    const uint current_scanline = scanline_idx;
+    scanline_idx = (scanline_idx + 1) % SCANLINE_COUNT;
+
+    const bool in_active_window =
+        (current_scanline >= VERTICAL_OFFSET) &&
+        (current_scanline < (DMG_PIXELS_Y + VERTICAL_OFFSET));
+
+    if (!in_active_window || packed_scanbuf == NULL)
+    {
+        // Force full black using TMDS zero symbol (not palette-derived) for porches/blank lines
+        const uint32_t black_word = tmds_table[0];
+        for (uint word_idx = 0; word_idx < words_per_channel; ++word_idx) {
+            tmdsbuf[2 * words_per_channel + word_idx] = black_word;
+            tmdsbuf[1 * words_per_channel + word_idx] = black_word;
+            tmdsbuf[0 * words_per_channel + word_idx] = black_word;
+        }
+    } 
     else 
     {
-        dmg_line_idx = scanline - offset;
-        
-        const uint8_t* packed_fb = (const uint8_t*)packed_display_ptr;
-        if (packed_fb != NULL) {
-            const uint8_t* packed_line = packed_fb + (dmg_line_idx * DMG_PIXELS_X / 4);  // 40 bytes per line            
-            // Simply copy the packed 2bpp data directly!
-            // No unpacking, no palette lookup - the TMDS encoder handles everything
-            // Encoder will apply RGB888 palette and 4× horizontal scaling (160→640 pixels)
-            // Plus 80 pixels of blank borders on each side for centering in 800 pixels
-            memcpy(line_buffer, packed_line, sizeof(line_buffer));  // Copy 40 bytes
-        } else {
-            // No frame yet, fill with black
-            memset(line_buffer, 0xFF, sizeof(line_buffer));
-        }
+        tmds_encode_2bpp_packed_gameboy(
+            packed_scanbuf,
+            tmdsbuf + 2 * words_per_channel,  // Red
+            tmdsbuf + 1 * words_per_channel,  // Green
+            tmdsbuf + 0 * words_per_channel,  // Blue
+            words_per_channel,
+            HORIZONTAL_SCALE,
+            DMG_PIXELS_X,
+            palette);
     }
 
-    const uint32_t *bufptr = (uint32_t*)line_buffer;
+    queue_add_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
+}
+                                     
+// Flexible 2bpp packed encoder with runtime RGB888 palette support
+// Input: packed 2bpp data (4 pixels per byte, 40 bytes = 160 pixels per scanline)
+// Output: RGB TMDS symbols with centered 4× horizontal scaling (160→640 pixels) + optional borders
+// Works for any resolution: calculates borders automatically based on output_words
+//   - 640x480: output_words=320 → 0px borders, 640 game pixels (160×4)
+//   - 800x600: output_words=400 → 80px borders each side, 640 game pixels (160×4)
+// With DVI_SYMBOLS_PER_WORD=2: pixels = output_words × 2
+// 2bpp packed encoder for 800x600 resolution with RGB888 palette support
+// Input: 40 bytes (160 GB pixels packed as 2bpp)
+// Output: 800 pixels (80 black border + 640 game area + 80 black border)
+// With DVI_SYMBOLS_PER_WORD=2: 800 pixels = 400 words per channel
+static void __not_in_flash_func(tmds_encode_2bpp_packed_gameboy)(
+    const uint8_t *packed_pixbuf,    // Input: packed pixels (e.g., 40 bytes = 160 pixels)
+    uint32_t *symbuf_r,              // Output: Red channel TMDS symbols
+    uint32_t *symbuf_g,              // Output: Green channel TMDS symbols
+    uint32_t *symbuf_b,              // Output: Blue channel TMDS symbols
+    size_t output_words,             // Number of output words per channel (pixels = output_words × DVI_SYMBOLS_PER_WORD)
+    uint32_t horizontal_repeat,      // Horizontal scale factor (e.g., 4 for x4, 2 for x2)
+    size_t input_pixels,             // Number of source pixels in the line (e.g., 160)
+    const uint32_t *palette_rgb888   // Palette: 4 RGB888 colors (0xRRGGBB format)
+)
+{
+    // Build TMDS symbol lookup tables from RGB888 palette at runtime
+    // This happens once per scanline, but it's only 12 lookups total (4 colors × 3 channels)
+    uint32_t tmds_palette_red[4];
+    uint32_t tmds_palette_green[4];
+    uint32_t tmds_palette_blue[4];
+
+    for (int i = 0; i < 4; i++)
+    {
+        uint32_t color = palette_rgb888[i];
+        uint8_t r8 = (color >> 16) & 0xFF;
+        uint8_t g8 = (color >> 8) & 0xFF;
+        uint8_t b8 = color & 0xFF;
+        
+        // Convert 8-bit to 6-bit indices for tmds_table lookup
+        tmds_palette_red[i]   = tmds_table[r8 >> 2];
+        tmds_palette_green[i] = tmds_table[g8 >> 2];
+        tmds_palette_blue[i]  = tmds_table[b8 >> 2];
+    }
+  
+    // Get black color for borders (darkest color in palette)
+    const uint32_t black_word = tmds_table[0];
+  
+    const uint8_t *src = packed_pixbuf;
+    const size_t packed_bytes = input_pixels / 4;  // 4 pixels per packed byte
+    const uint32_t words_per_pixel = horizontal_repeat / DVI_SYMBOLS_PER_WORD;  // each word = 2 pixels
+  
+  // Calculate horizontal layout based on output_words
+    // Compute active area from input pixel count and horizontal repeat factor
+    const size_t game_words = (input_pixels * horizontal_repeat) / DVI_SYMBOLS_PER_WORD;
+  
+    // Calculate border width on each side (centered)
+    // For 640x480: output_words=320, border=0
+    // For 800x600: output_words=400, border=40 words (80 pixels)
+    size_t border_words = (output_words > game_words) ? (output_words - game_words) / 2 : 0;
+    
+    size_t word_idx = 0;
+
+    // LEFT BORDER (if any)
+    for (size_t i = 0; i < border_words; i++)
+    {
+        symbuf_r[word_idx] = black_word;
+        symbuf_g[word_idx] = black_word;
+        symbuf_b[word_idx] = black_word;
+        word_idx++;
+    }
+  
+    // GAME AREA: input_pixels × horizontal_repeat
+    // Process each input byte (contains 4 packed pixels)
+    // Each pixel gets replicated horizontal_repeat× for horizontal scaling
+    for (size_t byte_idx = 0; byte_idx < packed_bytes; byte_idx++) 
+    {
+        uint8_t packed_byte = src[byte_idx];
+      
+        // Extract and process each of the 4 pixels in this byte
+        for (int pixel_in_byte = 0; pixel_in_byte < 4; pixel_in_byte++)
+        {
+            // Extract 2-bit pixel value (MSB first: bits 7-6, 5-4, 3-2, 1-0)
+            uint shift = (3 - pixel_in_byte) * 2;
+            uint8_t pixel_2bpp = (packed_byte >> shift) & 0x03;
+            
+            // Get TMDS symbol pair for this color
+            uint32_t word_r = tmds_palette_red[pixel_2bpp];
+            uint32_t word_g = tmds_palette_green[pixel_2bpp];
+            uint32_t word_b = tmds_palette_blue[pixel_2bpp];
+            
+            // Replicate this pixel horizontally: two TMDS symbols per word
+            for (uint32_t repeat = 0; repeat < words_per_pixel; repeat++)
+            {
+                symbuf_r[word_idx] = word_r;
+                symbuf_g[word_idx] = word_g;
+                symbuf_b[word_idx] = word_b;
+                word_idx++;
+            }
+        }
+    }
+  
+    // RIGHT BORDER: Fill remaining words with black
+    while (word_idx < output_words)
+    {
+        symbuf_r[word_idx] = black_word;
+        symbuf_g[word_idx] = black_word;
+        symbuf_b[word_idx] = black_word;
+        word_idx++;
+    }
+}
+
+static void __no_inline_not_in_flash_func(core1_scanline_callback)(uint scanline)
+{
+    const bool in_active_window =
+        (scanline >= VERTICAL_OFFSET) && (scanline < (DMG_PIXELS_Y + VERTICAL_OFFSET));
+
+    const uint8_t* packed_fb = (const uint8_t*)packed_display_ptr;
+    const uint32_t *bufptr = NULL;
+    if (in_active_window && (packed_fb != NULL))
+    {
+        uint dmg_line_idx = scanline - VERTICAL_OFFSET;
+        const uint8_t* packed_line = packed_fb + (dmg_line_idx * DMG_PIXELS_X / 4);  // 40 bytes per line
+        memcpy(line_buffer, packed_line, sizeof(line_buffer));  // Copy 40 bytes
+        bufptr = (uint32_t*)line_buffer;
+    }
+
     queue_add_blocking_u32(&dvi0.q_colour_valid, &bufptr);
     
     while (queue_try_remove_u32(&dvi0.q_colour_free, &bufptr))
@@ -934,33 +1014,6 @@ static void boot_checkpoint(const char *label)
     uart_puts(uart1, "\n");
 }
 
-static void __no_inline_not_in_flash_func(prepare_scanline_2bpp_gameboy)(struct dvi_inst *inst, const uint8_t *packed_scanbuf)
-{
-    uint32_t *tmdsbuf = NULL;
-    queue_remove_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
-    uint pixwidth = inst->timing->h_active_pixels;           // e.g., 800
-    uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;  // e.g., 400 when SPW=2
-
-    static const uint32_t default_palette[4] = {
-        0xb5c69c, 0x8d9c7b, 0x6c7251, 0x303820
-    };
-    const uint32_t *palette = (const uint32_t*)inst->blank_settings.palette_rgb888;
-    if (palette == NULL) {
-        palette = default_palette;
-    }
-
-    tmds_encode_2bpp_packed_gameboy(
-        packed_scanbuf,
-        tmdsbuf + 2 * words_per_channel,  // Red
-        tmdsbuf + 1 * words_per_channel,  // Green
-        tmdsbuf + 0 * words_per_channel,  // Blue
-        words_per_channel,
-        palette);
-
-    queue_add_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
-}
-
-
 #if ENABLE_AUDIO
 // static void __not_in_flash_func(on_analog_samples_ready)(void)
 static void on_analog_samples_ready(void)
@@ -1346,29 +1399,33 @@ int main(void)
                 video_capture_active = true;
                 video_capture_started = true;
 
-                // Apply frame blending if enabled (works on packed 2bpp data)
-                if (frame_blending_enabled) {
+                // Apply frame blending if enabled (packed 2bpp data)
+                if (frame_blending_enabled)
+                {
                     // Ultra-fast frame blending using precomputed lookup tables
                     // Logic from old_code.c:
                     //   - Blend: white pixels (0) OR with previous frame
                     //   - Store: non-white pixels become gray (2) to "brighten up the previous frame"                
                     // This creates visible ghost trails that fade after one frame
                     // Blend calculation done inline to save 64KB RAM (instead of blend_lut)
-                    for (size_t i = 0; i < PACKED_FRAME_SIZE; i++) {
+                    
+                    for (size_t i = 0; i < PACKED_FRAME_SIZE; i++)
+                    {
                         uint8_t current = completed_packed[i];
                         uint8_t previous = packed_buffer_previous[i];
-                        
+
                         // Calculate blended result inline: white (0) pixels OR with previous (ghost effect)
                         uint8_t blended = 0;
-                        for (int pixel = 0; pixel < 4; pixel++) {
+                        for (int pixel = 0; pixel < 4; pixel++)
+                        {
                             int shift = (3 - pixel) * 2;
                             uint8_t p_curr = (current >> shift) & 0x03;
                             uint8_t p_prev = (previous >> shift) & 0x03;
                             uint8_t p_blend = (p_curr == 0) ? (p_curr | p_prev) : p_curr;
-                            blended |= (p_blend << shift);
+                            blended |= (uint8_t)(p_blend << shift);
                         }
                         completed_packed[i] = blended;
-                        
+
                         // Single lookup for brightened ghost (non-white→gray, white→white)
                         // This matches: *pixel_old++ = new_value > 0 ? 2 : 0;
                         packed_buffer_previous[i] = store_lut[current];

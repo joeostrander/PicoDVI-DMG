@@ -1,10 +1,11 @@
 @ECHO OFF
 
-SET DRIVE_LETTER=E:
-SET PLATFORM=rp2040
-SET BOARD=pico
-@REM SET PLATFORM=rp2350
-@REM SET BOARD=pico2
+SET DRIVE_LETTER=D:
+@REM SET PLATFORM=rp2040
+@REM SET BOARD=pico
+SET PLATFORM=rp2350
+SET BOARD=pico2
+SET RESOLUTION_MODE=2
 
 cd %~dp0
 rmdir /s /q build 2>nul
@@ -12,7 +13,7 @@ mkdir build
 cd build
 echo.
 echo ===== Running CMake Configuration =====
-cmake -G "MinGW Makefiles" -DPICO_COPY_TO_RAM=1 -DPICO_PLATFORM=%PLATFORM% -DPICO_BOARD=%BOARD% ..
+cmake -G "MinGW Makefiles" -DPICO_COPY_TO_RAM=1 -DPICO_PLATFORM=%PLATFORM% -DPICO_BOARD=%BOARD% -DRESOLUTION_MODE=%RESOLUTION_MODE% ..
 if %errorlevel% neq 0 (
     echo.
     echo *** CMAKE CONFIGURATION FAILED ***
