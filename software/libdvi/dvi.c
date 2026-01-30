@@ -8,7 +8,7 @@
 #include "dvi_timing.h"
 #include "dvi_serialiser.h"
 #include "tmds_encode.h"
-#include "shared_dma_handler.h"
+#include "shared_dma_handler.h" // JOE MODIFICATION
 
 // Time-critical functions pulled into RAM but each in a unique section to
 // allow garbage collection
@@ -65,6 +65,7 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
 
 }
 
+ // JOE MODIFICATION START
 // The IRQs will run on whichever core calls this function (this is why it's
 // called separately from dvi_init)
 void dvi_register_irqs_this_core(struct dvi_inst *inst, uint irq_num) {
@@ -122,6 +123,7 @@ void dvi_unregister_irqs_this_core(struct dvi_inst *inst, uint irq_num) {
     inst->tmds_buf_release[1] = NULL;
     inst->tmds_buf_release[0] = NULL;
 }
+// JOE MODIFICATION END
 
 // Set up control channels to make transfers to data channels' control
 // registers (but don't trigger the control channels -- this is done either by
