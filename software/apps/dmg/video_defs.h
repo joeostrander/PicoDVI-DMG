@@ -30,7 +30,7 @@
 
 #define HORIZONTAL_SCALE 4
 
-const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
+static const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K) = {
     .h_sync_polarity   = false,
     .h_front_porch     = 44,
     .h_sync_width      = 128,
