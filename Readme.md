@@ -6,6 +6,8 @@ Also see the emulator version:
 https://github.com/joeostrander/PicoDVI-DMG_EMU 
 
 --- 
+Update 2026.01.31
+ - PCB Images and gerber
 Update 2026.01.20
  - Added the On-Screen Display
 
@@ -30,9 +32,7 @@ Update 2025.11.24
 
 ![gameplay preview](./images/gameplay.gif?raw=true)  
 
-![pcb rev 1](./images/pcb_rev1.jpg?raw=true)  
-
-![hardware](./images/hardware.jpg?raw=true)  
+![pcb rev 2](./images/pcb_rev2.png?raw=true)  
 
 ![dmg theme](./images/preview_dmg.jpg?raw=true)  
 
