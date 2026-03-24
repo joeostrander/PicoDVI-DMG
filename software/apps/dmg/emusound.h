@@ -2,6 +2,7 @@
 #define EMUSOUND_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #define SAMPLE_FREQ         32000
 // Use power of 2 for efficient modulo operations
@@ -30,6 +31,9 @@ void emu_audio_set_gain(float gain);
 float emu_audio_get_gain(void);
 // Enable single-pole low-pass filter; pass cutoff_hz<=0 to disable (no filtering)
 void emu_audio_set_lowpass(float cutoff_hz);
+// Enable single-pole high-pass filter (DC blocker); pass cutoff_hz<=0 to disable.
+void emu_audio_set_highpass(float cutoff_hz);
+float emu_audio_get_highpass(void);
 
 
 

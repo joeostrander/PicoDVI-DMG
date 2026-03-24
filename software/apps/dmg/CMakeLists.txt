@@ -62,8 +62,11 @@ target_link_libraries(dmg
 # set(PICO_DEFAULT_UART 1)         # Use UART1
 # set(PICO_DEFAULT_UART_TX_PIN 20) # GPIO20 for TX
 # set(PICO_DEFAULT_UART_RX_PIN 21) # GPIO21 for RX
-pico_enable_stdio_uart(dmg 1)
-pico_enable_stdio_usb(dmg 0)
+# pico_enable_stdio_uart(dmg 1)
+# pico_enable_stdio_usb(dmg 0)
+# or for consolizer v1 board:
+pico_enable_stdio_uart(dmg 0)
+pico_enable_stdio_usb(dmg 1)
 
 # Build pio programs
 pico_generate_pio_header(dmg ${CMAKE_CURRENT_LIST_DIR}/video_capture.pio)

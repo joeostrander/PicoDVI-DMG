@@ -29,14 +29,6 @@ make improved OSD
 
 // Thanks to PicoDVI and PicoDVI-N64 for getting me started :)
 
-// Can't use hardware UART, all GPIO used!
-// Keep these defines at the top before including pico headers
-#define PICO_DEFAULT_UART_BAUD_RATE 115200
-#define PICO_DEFAULT_UART_TX_PIN    20
-#define PICO_DEFAULT_UART_RX_PIN    21
-#define PICO_DEFAULT_UART 1
-// #define PICO_STDIO_DEFAULT_CRLF 1
-
 // REMINDER: Always use cmake with:  -DPICO_COPY_TO_RAM=1
 
 // #pragma GCC optimize("Os")
@@ -92,6 +84,14 @@ make improved OSD
 #define AUDIO_ON_CORE1              1  // Route audio tick work to Core 1 alongside DVI
 #define BIT_IS_CLEAR(value, bit)    (((value) & (1U << (bit))) == 0)
 
+// Compile-time audio profile selector
+#define AUDIO_PROFILE_RAW           0
+#define AUDIO_PROFILE_STABLE        1
+#define AUDIO_PROFILE_TUNED         2
+#ifndef AUDIO_PROFILE
+#define AUDIO_PROFILE               AUDIO_PROFILE_RAW
+#endif
+
 
 #if ENABLE_AUDIO
 static const int hdmi_n[6] = {4096, 6272, 6144, 3136, 4096, 6144};  // 32k, 44.1k, 48k, 22.05k, 16k, 24k
@@ -99,12 +99,62 @@ static uint16_t rate = SAMPLE_FREQ;
 // #define AUDIO_BUFFER_SIZE   (0x1<<8) // Must be power of 2
 audio_sample_t audio_buffer[AUDIO_BUFFER_SIZE];
 
+#if AUDIO_PROFILE == AUDIO_PROFILE_RAW
+#define AUDIO_PROFILE_NAME          "RAW"
+#define AUDIO_PROFILE_GAIN          1.0f
+#define AUDIO_PROFILE_HPF_HZ        0.0f
+#define AUDIO_PROFILE_LPF_HZ        0.0f
+#elif AUDIO_PROFILE == AUDIO_PROFILE_STABLE
+#define AUDIO_PROFILE_NAME          "STABLE"
+#define AUDIO_PROFILE_GAIN          1.0f
+#define AUDIO_PROFILE_HPF_HZ        3.0f
+#define AUDIO_PROFILE_LPF_HZ        4200.0f
+#elif AUDIO_PROFILE == AUDIO_PROFILE_TUNED
+#define AUDIO_PROFILE_NAME          "TUNED"
+#define AUDIO_PROFILE_GAIN          1.3f
+#define AUDIO_PROFILE_HPF_HZ        5.0f
+#define AUDIO_PROFILE_LPF_HZ        3500.0f
+#else
+#error "Invalid AUDIO_PROFILE value"
+#endif
+
 #define PIN_AUDIO_IN                28 // ADC2
 #endif
 
 // #define DEBUG_BUTTON_PRESS
 
 #define ONBOARD_LED_PIN             25
+
+#define GAMEBOY_RESET_PIN           4
+
+// ************** CHOOSE PCB REVISION **************
+#define USE_CONSOLIZER_PCB_V1
+#ifdef USE_CONSOLIZER_PCB_V1
+#define DVI_SERIAL_CONFIG           adafruit_hstx_cfg
+
+// GAMEBOY VIDEO INPUT (From level shifter)
+#define HSYNC_PIN                   8
+#define DATA_1_PIN                 11
+#define DATA_0_PIN                 10
+#define PIXEL_CLOCK_PIN             9
+#define VSYNC_PIN                   7
+#define DMG_READING_BUTTONS_PIN    21       // P15 (input, DMG will set HIGH when reading buttons)
+#define DMG_READING_DPAD_PIN       20       // P14 (input, DMG will set HIGH when reading D-PAD)
+#define DMG_OUTPUT_RIGHT_A_PIN      6       // P10 (output, button 'A' or 'RIGHT' state, depending on DMG_READING pins)
+#define DMG_OUTPUT_UP_SELECT_PIN   26       // P12 (output, button 'SELECT' or 'UP' state, depending on DMG_READING pins)
+#define DMG_OUTPUT_DOWN_START_PIN  22       // P13 (output, button 'START' or 'DOWN' state, depending on DMG_READING pins)
+#define DMG_OUTPUT_LEFT_B_PIN      27       // P11 (output, button 'B' or 'LEFT' state, depending on DMG_READING pins)
+
+// I2C Pins, etc. -- for I2C controller
+#define NES_CONTROLLER_INIT_DELAY_MS    1000u
+#define NES_CONTROLLER_REINIT_DELAY_MS  1000u
+#define SDA_PIN                         2
+#define SCL_PIN                         3
+#define I2C_ADDRESS                     0x52
+i2c_inst_t* i2cHandle = i2c1;
+#else
+
+#define DVI_SERIAL_CONFIG           DVI_DEFAULT_SERIAL_CONFIG
 
 // GAMEBOY VIDEO INPUT (From level shifter)
 #define HSYNC_PIN                   0
@@ -126,6 +176,7 @@ audio_sample_t audio_buffer[AUDIO_BUFFER_SIZE];
 #define SCL_PIN                         27
 #define I2C_ADDRESS                     0x52
 i2c_inst_t* i2cHandle = i2c1;
+#endif
 
 #define SPLASH_DURATION_MS          3000u
 
@@ -287,6 +338,16 @@ static const __unused uint32_t __scratch_x("tmds_table") tmds_table[] = {
 #include "tmds_table.h"
 };
 
+
+// Adafruit HSTX
+static const struct dvi_serialiser_cfg adafruit_hstx_cfg = {
+	.pio = DVI_DEFAULT_PIO_INST,
+	.sm_tmds = {0, 1, 2},
+	.pins_tmds = {18, 16, 12},
+	.pins_clk = 14,
+	.invert_diffpairs = false
+};
+
 //********************************************************************************
 // PRIVATE FUNCTION PROTOTYPES
 //********************************************************************************
@@ -314,7 +375,6 @@ static void reset_button_states(void);
 static void save_settings(void);
 static void reset_pico(restart_option_t restart_option);
 static void load_settings(void);
-static void boot_checkpoint(const char *label);
 
 #if ENABLE_AUDIO
 static void on_analog_samples_ready(void);
@@ -590,12 +650,21 @@ static void initialize_gpio(void)
     gpio_set_dir(ONBOARD_LED_PIN, GPIO_OUT);
     gpio_put(ONBOARD_LED_PIN, 0);
 
+    // Gameboy Reset
+    gpio_init(GAMEBOY_RESET_PIN);
+    gpio_set_dir(GAMEBOY_RESET_PIN, GPIO_OUT);
+    gpio_put(GAMEBOY_RESET_PIN, 1);  // Not in reset (active LOW)
+
     // Gameboy video signal inputs
     gpio_init(VSYNC_PIN);
     gpio_init(PIXEL_CLOCK_PIN);
     gpio_init(DATA_0_PIN);
     gpio_init(DATA_1_PIN);
     gpio_init(HSYNC_PIN);
+    gpio_set_dir(VSYNC_PIN, GPIO_IN);
+    gpio_set_dir(PIXEL_CLOCK_PIN, GPIO_IN);
+    gpio_set_dir(HSYNC_PIN, GPIO_IN);
+
 
     //Initialize I2C port at 400 kHz
     i2c_init(i2cHandle, 400 * 1000);
@@ -984,7 +1053,6 @@ static void reset_pico(restart_option_t restart_option)
 
 static void load_settings(void)
 {
-    boot_checkpoint("Loading settings...\n");
     uint8_t scheme = (uint8_t)SCHEME_SGB_4H;
     if (EEPROM_read(SAVE_INDEX_SCHEME, &scheme) == EEPROM_SUCCESS)
     {
@@ -996,32 +1064,22 @@ static void load_settings(void)
     }
     set_game_palette((int)scheme);
 
-    boot_checkpoint("Settings loaded");
-
     // set_scheme_index((int)EEPROM_read(SAVE_INDEX_SCHEME));
     // frame_blending_enabled = EEPROM_read(SAVE_INDEX_FRAME_BLENDING) == 1;
-}
-
-static void boot_checkpoint(const char *label)
-{
-    if (label == NULL) {
-        return;
-    }
-
-    //printf("[BOOT] %s\n", label);
-    uart_puts(uart1, "[BOOT] ");
-    uart_puts(uart1, label);
-    uart_puts(uart1, "\n");
 }
 
 #if ENABLE_AUDIO
 // static void __not_in_flash_func(on_analog_samples_ready)(void)
 static void on_analog_samples_ready(void)
 {
-    
+
     // ADC has filled the write buffer with fresh samples
     // Read them into the current write buffer
     int samples_read = analog_microphone_read((int16_t*)adc_write_buffer, ADC_CHUNK_SIZE);
+
+#ifndef AUDIO_DEBUG
+    (void)samples_read;
+#endif
     
     // Copy the JUST-READ samples (from write buffer) to the fixed buffer that timed function reads from
     // We copy from adc_write_buffer because that's what we just filled above!
@@ -1046,7 +1104,7 @@ static void on_analog_samples_ready(void)
 static void __no_inline_not_in_flash_func(gpio_callback)(uint gpio, uint32_t events)
 {
 #if ENABLE_VIDEO_CAPTURE
-    // Handle VSYNC IRQ for video capture (GPIO 4) - ONLY IN IRQ MODE
+    // Handle VSYNC IRQ for video capture (GPIO 7) - ONLY IN IRQ MODE
     if (gpio == VSYNC_PIN) 
     {
         video_capture_handle_vsync_irq(events);
@@ -1158,25 +1216,25 @@ int main(void)
     set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
     reset_button_states();
 
-    // Initialize stdio for serial debugging
-    uart_init(uart1, PICO_DEFAULT_UART_BAUD_RATE);
-    gpio_set_function(PICO_DEFAULT_UART_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(PICO_DEFAULT_UART_RX_PIN, GPIO_FUNC_UART);
-    // stdio_init_all();
-    stdio_uart_init_full(uart1, PICO_DEFAULT_UART_BAUD_RATE, PICO_DEFAULT_UART_TX_PIN, PICO_DEFAULT_UART_RX_PIN);  // TX=20, RX=21
-    setvbuf(stdout, NULL, _IONBF, 0);
-    sleep_ms(3000);
+    // // Initialize stdio for serial debugging
+    // uart_init(uart1, PICO_DEFAULT_UART_BAUD_RATE);
+    // gpio_set_function(PICO_DEFAULT_UART_TX_PIN, GPIO_FUNC_UART);
+    // gpio_set_function(PICO_DEFAULT_UART_RX_PIN, GPIO_FUNC_UART);
+    // // stdio_init_all();
+    // stdio_uart_init_full(uart1, PICO_DEFAULT_UART_BAUD_RATE, PICO_DEFAULT_UART_TX_PIN, PICO_DEFAULT_UART_RX_PIN);  // TX=20, RX=21
+    // setvbuf(stdout, NULL, _IONBF, 0);
+    // sleep_ms(3000);
 
     // Initialize frame blending lookup tables (one-time computation)
     // Both modes use packed buffers for capture, so both need LUTs
     init_frame_blending_luts();
     
-    // Force flush and try multiple times
-    for (int i = 0; i < 5; i++) {
-        printf("\n\n=== PicoDVI-DMG Starting (attempt %d) ===\n", i+1);
-        stdio_flush();
-        sleep_ms(100);
-    }
+    // // Force flush and try multiple times
+    // for (int i = 0; i < 5; i++) {
+    //     printf("\n\n=== PicoDVI-DMG Starting (attempt %d) ===\n", i+1);
+    //     stdio_flush();
+    //     sleep_ms(100);
+    // }
 
     // Mario image is now pre-packed in 2bpp format (saves 17KB RAM!)
     // Simply copy the packed data directly to the display buffers
@@ -1193,7 +1251,7 @@ int main(void)
     OSD_set_enabled(false);
 
     dvi0.timing = &DVI_TIMING;
-    dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
+    dvi0.ser_cfg = DVI_SERIAL_CONFIG;
     //dvi0.scanline_callback = (dvi_callback_t*)core1_scanline_callback;
     dvi0.scanline_callback = core1_scanline_callback;
     dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
@@ -1249,8 +1307,14 @@ int main(void)
         printf("Starting audio timer (500Hz chunk rate)...\n");
     }
 	emu_sndInit(false, false, &dvi0.audio_ring, sample_buffer_for_audio);
-    emu_audio_set_gain(2.0f);  // Boost audio volume
-    emu_audio_set_lowpass(3000.0f); // try 2–4 kHz to shave hiss
+    emu_audio_set_gain(AUDIO_PROFILE_GAIN);
+    emu_audio_set_highpass(AUDIO_PROFILE_HPF_HZ);
+    emu_audio_set_lowpass(AUDIO_PROFILE_LPF_HZ);
+    printf("Audio profile: %s (gain=%.2f, hpf=%.1fHz, lpf=%.1fHz)\n",
+           AUDIO_PROFILE_NAME,
+           (double)AUDIO_PROFILE_GAIN,
+           (double)AUDIO_PROFILE_HPF_HZ,
+           (double)AUDIO_PROFILE_LPF_HZ);
     printf("Audio system initialized\n");
     
 #endif
@@ -1270,7 +1334,7 @@ int main(void)
     }
     // Video uses polled completion (no IRQ) to avoid contention
     printf("  -> DMA initialized (packed format: %d bytes, polled completion)\n", PACKED_FRAME_SIZE);
-    stdio_flush();
+    // stdio_flush();
 #endif
 
     // Always start DVI output on Core 1, regardless of audio
@@ -1310,9 +1374,7 @@ int main(void)
     printf("Analog microphone started successfully - DMA should be running\n");
 #endif
 
-    boot_checkpoint("Initializing GPIO");
     initialize_gpio();
-    boot_checkpoint("GPIO initialized");
 
     for (int i = 0; i < 5; i++) {
         printf("\n\n=== PicoDVI-DMG_EMU Starting (attempt %d) ===\n", i + 1);
@@ -1321,13 +1383,11 @@ int main(void)
 
     printf("Firmware build: %s %s\n", __DATE__, __TIME__);
 
-    boot_checkpoint("Registering GPIO callback");
     // Set up shared GPIO callback - this handles BOTH DMG buttons AND VSYNC
     gpio_set_irq_enabled_with_callback(DMG_READING_DPAD_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, &gpio_callback);
     gpio_set_irq_enabled(DMG_READING_BUTTONS_PIN, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);  // Callback already registered
-    boot_checkpoint("GPIO callback registered");
 
-    // Enable VSYNC interrupt (GPIO 4) after callback registration
+    // Enable VSYNC interrupt (GPIO 7) after callback registration
 #if ENABLE_VIDEO_CAPTURE
     irq_set_priority(IO_IRQ_BANK0, 0x00);  // Max priority to avoid missing VSYNC edges
     gpio_set_irq_enabled(VSYNC_PIN, GPIO_IRQ_EDGE_RISE, true);
@@ -1353,6 +1413,7 @@ int main(void)
     {
         static uint32_t loop_counter = 0;
         static uint32_t frames_captured = 0;
+
 #if ENABLE_VIDEO_CAPTURE
 
         // Skip arming capture until splash time has elapsed

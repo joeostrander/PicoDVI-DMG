@@ -3,15 +3,15 @@
 ; Synchronized to VSYNC, HSYNC and pixel clock
 ;
 ; Pin mapping (GPIO):
-;   HSYNC_PIN = 0
-;   DATA_0_PIN = 1
-;   DATA_1_PIN = 2
-;   PIXEL_CLOCK_PIN = 3
-;   VSYNC_PIN = 4
+;   HSYNC_PIN = 8
+;   DATA_0_PIN = 10
+;   DATA_1_PIN = 11
+;   PIXEL_CLOCK_PIN = 9
+;   VSYNC_PIN = 7
 ;
-; DATA pins are consecutive (1,2), so we read from base pin 1:
-;   Pin 0 (relative) = GPIO 1 = DATA_1
-;   Pin 1 (relative) = GPIO 2 = DATA_0
+; DATA pins are consecutive (10,11), so we read from base pin 10:
+;   Pin 0 (relative) = GPIO 10 = DATA_0
+;   Pin 1 (relative) = GPIO 11 = DATA_1
 ; We'll read 2 bits and get DATA_0 (LSB), DATA_1 (MSB)
 ;
 ; Note: Set instruction can only use 0-31, so we can't loop 40 times directly
@@ -37,8 +37,8 @@
     
 line_loop:
     ; Wait for HSYNC to start line  
-    wait 1 gpio 0       ; Wait for HSYNC high (blanking/setup)
-    wait 0 gpio 0       ; Wait for HSYNC low (falling edge)
+    wait 1 gpio 8       ; Wait for HSYNC high (blanking/setup)
+    wait 0 gpio 8       ; Wait for HSYNC low (falling edge)
     
     ; Capture first 152 pixels (19 groups of 8) with full clock cycle
     set x, 18           ; 19 iterations - 1
@@ -47,9 +47,9 @@ pixel_group_loop:
     set y, 7            ; 8 pixels - 1
 
 pixel_loop:
-    wait 0 gpio 3       ; Wait for clock FALLING edge (1→0) - Note: on 1st iteration, it will already be low!
+    wait 0 gpio 9       ; Wait for clock FALLING edge (1→0) - Note: on 1st iteration, it will already be low!
     in pins, 2          ; Read pixel on falling edge
-    wait 1 gpio 3       ; Wait for clock rising (prepare for next cycle)
+    wait 1 gpio 9       ; Wait for clock rising (prepare for next cycle)
     jmp y-- pixel_loop  ; Inner loop: repeat 8 times
     
     jmp x-- pixel_group_loop  ; Outer loop: repeat 19 times
@@ -59,13 +59,13 @@ pixel_loop:
     set y, 6            ; 7 pixels - 1 (pixels 152-158)
 
 final_loop:
-    wait 0 gpio 3       ; Wait for clock falling edge
+    wait 0 gpio 9       ; Wait for clock falling edge
     in pins, 2          ; Read pixel
-    wait 1 gpio 3       ; Wait for clock rising
+    wait 1 gpio 9       ; Wait for clock rising
     jmp y-- final_loop
     
     ; Read the very last pixel (159) - NO wait for rising edge!
-    wait 0 gpio 3       ; Wait for clock falling edge
+    wait 0 gpio 9       ; Wait for clock falling edge
     in pins, 2          ; Read pixel 159
 
     jmp line_loop       ; Go back to wait for NEXT line's HSYNC
@@ -95,7 +95,7 @@ static inline void dma_channel_set_irq3_enabled(uint channel, bool enabled) {
 }
 #endif
 
-// VSYNC IRQ handler - handles only VSYNC GPIO 4
+// VSYNC IRQ handler - handles only VSYNC GPIO 7
 // NOTE: This gets called from the main GPIO callback in main.c
 static inline void video_capture_vsync_irq_handler(uint32_t events)
 {
@@ -160,12 +160,12 @@ static inline void video_capture_program_init(PIO pio, uint sm, uint offset)
     vsync_frame_start = false;
     capture_armed = false;
     
-    // Set input base pin to DATA_1 (GPIO 1)
+    // Set input base pin to DATA_0 (GPIO 10)
     // This makes:
-    //   pin 0 (relative) = GPIO 1 = DATA_1
-    //   pin 1 (relative) = GPIO 2 = DATA_0
+    //   pin 0 (relative) = GPIO 10 = DATA_0
+    //   pin 1 (relative) = GPIO 11 = DATA_1
     // So "in pins, 2" reads DATA_0 (LSB), DATA_1 (MSB)
-    sm_config_set_in_pins(&c, 1);  // Base = GPIO 1 (DATA_1)
+    sm_config_set_in_pins(&c, 10);  // Base = GPIO 10 (DATA_0)
     
     // Configure autopush - push every 8 bits (4 pixels @ 2 bits each)
     // shift_right=false (shift left into ISR from LSB side)
@@ -178,12 +178,17 @@ static inline void video_capture_program_init(PIO pio, uint sm, uint offset)
     // Initialize the state machine
     pio_sm_init(pio, sm, offset, &c);
     
-    // IRQ MODE: Set up VSYNC GPIO (GPIO 4) as input
+    // IRQ MODE: Set up VSYNC GPIO (GPIO 7) as input
     // The interrupt will be enabled in main.c after callback registration
-    gpio_init(4);
-    gpio_set_dir(4, GPIO_IN);
-    gpio_pull_down(4);  // Pull down to avoid floating
+    gpio_init(7);
+    gpio_set_dir(7, GPIO_IN);
+    gpio_pull_down(7);  // Pull down to avoid floating
     
+    gpio_init(8);
+    gpio_set_dir(8, GPIO_IN);
+    gpio_pull_down(8);
+
+
     // NOTE: The VSYNC GPIO interrupt is enabled in main.c AFTER the shared callback is registered
     // DO NOT call gpio_set_irq_enabled() here - it will be cleared when main.c registers the callback
     
