@@ -48,7 +48,7 @@ make improved OSD
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
-#include <hardware/watchdog.h>
+#include "hardware/watchdog.h"
 #include "hardware/vreg.h"
 #include "hardware/i2c.h"
 #include "hardware/irq.h"
@@ -89,7 +89,7 @@ make improved OSD
 #define ENABLE_AUDIO                1  // Set to 1 to enable audio, 0 to disable all audio code
 #define ENABLE_VIDEO_CAPTURE        1
 #define ENABLE_OSD                  1  // Set to 1 to enable OSD code, 0 to disable
-#define AUDIO_ON_CORE1              1  // Route audio tick work to Core 1 alongside DVI
+#define AUDIO_ON_CORE1              0  // Set to 1 to run audio processing on Core 1 (alongside DVI) to reduce contention with VSYNC GPIO handling on Core 0; set to 0 to run audio on Core 0 with timer IRQ (default)
 #define BIT_IS_CLEAR(value, bit)    (((value) & (1U << (bit))) == 0)
 
 
@@ -761,7 +761,6 @@ static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
         return false;
     }
 
-    // Debounce/arm: require several consecutive idle frames before honoring input.
     bool any_pressed = false;
     for (i = 0; i < BUTTON_COUNT; i++)
     {
@@ -1022,9 +1021,12 @@ static void on_analog_samples_ready(void)
     // ADC has filled the write buffer with fresh samples
     // Read them into the current write buffer
     int samples_read = analog_microphone_read((int16_t*)adc_write_buffer, ADC_CHUNK_SIZE);
+
+    #ifndef AUDIO_DEBUG
+    (void)samples_read;
+    #endif
     
-    // Copy the JUST-READ samples (from write buffer) to the fixed buffer that timed function reads from
-    // We copy from adc_write_buffer because that's what we just filled above!
+    // Copy the just-read samples to the fixed audio buffer.
     memcpy(sample_buffer_for_audio, (void*)adc_write_buffer, ADC_CHUNK_SIZE * sizeof(int16_t));
     
     // Atomically swap buffers - get ready for next ADC capture
@@ -1039,7 +1041,7 @@ static void on_analog_samples_ready(void)
         printf("ADC callback #%lu: read %d samples, sample[0]=%d, sample_buffer_for_audio[32]=%d\n",
                callback_count, samples_read, sample_buffer_for_audio[0], sample_buffer_for_audio[32]);
     }
-#endif
+    #endif
 }
 #endif
 
