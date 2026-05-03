@@ -5,7 +5,11 @@
 Also see the emulator version:  
 https://github.com/joeostrander/PicoDVI-DMG_EMU 
 
+NOTE: 3.5mm jack on the PCB is an input.  Audio output is over HDMI.
+
 --- 
+Update 2026.05.02  
+ - Added bluetooth branch for anyone wanting to use a bluetooth controller.  Pair button set to GPIO 22  
 Update 2026.01.31  
  - PCB Images and gerber  
  
@@ -26,7 +30,7 @@ Update 2025.12.05
  - PIO-based video capture
 
 Update 2025.11.24
- - Audio is now working! 
+ - Audio is now working!  
 
 ---
 
