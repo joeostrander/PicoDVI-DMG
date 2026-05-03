@@ -43,7 +43,7 @@ static const struct dvi_timing __not_in_flash_func(dvi_timing_800x600p_60hz_280K
     .v_back_porch      = 22,
     .v_active_lines    = 600,
 
-    .bit_clk_khz       = 280000
+    .bit_clk_khz       = 252000
 };
 
 #define VREG_VSEL VREG_VOLTAGE_1_20
