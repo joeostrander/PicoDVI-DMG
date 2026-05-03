@@ -17,6 +17,40 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 target_compile_options(dmg PRIVATE -Wall)
 
+# Optional Bluetooth controller support (Pico W / Pico 2 W).
+# 0 = disabled (default), 1 = Bluetooth HID host.
+set(USE_BLUETOOTH_CONTROLLER "0" CACHE STRING "Controller mode: 0=NES Classic/Wii I2C, 1=Bluetooth HID host")
+set_property(CACHE USE_BLUETOOTH_CONTROLLER PROPERTY STRINGS 0 1)
+message(STATUS "dmg: USE_BLUETOOTH_CONTROLLER=${USE_BLUETOOTH_CONTROLLER}")
+
+set(BT_TEST_HOST_FILES_ROOT "${CMAKE_SOURCE_DIR}/ext/host_files")
+
+if(USE_BLUETOOTH_CONTROLLER STREQUAL "1")
+    set(BT_BLUEHOST_DIR "${BT_TEST_HOST_FILES_ROOT}/bluehost-lib")
+    set(BT_PARSER_DIR "${BT_TEST_HOST_FILES_ROOT}/parser-lib")
+
+    if(NOT EXISTS "${BT_BLUEHOST_DIR}/blue_host.c")
+        message(FATAL_ERROR "Bluetooth host source not found: ${BT_BLUEHOST_DIR}/blue_host.c")
+    endif()
+
+    if(NOT EXISTS "${BT_PARSER_DIR}/gamepad_parser.c")
+        message(FATAL_ERROR "Bluetooth parser source not found: ${BT_PARSER_DIR}/gamepad_parser.c")
+    endif()
+
+    target_sources(dmg PRIVATE
+        ${BT_BLUEHOST_DIR}/blue_host.c
+        ${BT_PARSER_DIR}/gamepad_parser.c
+        ${BT_PARSER_DIR}/hidparser.c
+    )
+
+    target_include_directories(dmg PRIVATE
+        ${BT_BLUEHOST_DIR}
+        ${BT_PARSER_DIR}
+        ${PICO_SDK_PATH}/src/rp2_common/pico_cyw43_arch/include
+        ${PICO_SDK_PATH}/src/rp2_common/pico_btstack/include
+    )
+endif()
+
 # Set resolution mode (choose 0/1/2)
 # 0 = 640x480, horizontally scaled x4, vertically x3 --> 640x480 Full screen
 # 1 = 800x600, horizontally scaled x4, vertically x4 --> 640x576 window
@@ -37,6 +71,7 @@ target_compile_definitions(dmg PRIVATE
     DVI_VERTICAL_REPEAT=${DVI_VERTICAL_REPEAT_VALUE}
     DVI_SYMBOLS_PER_WORD=2
     RESOLUTION_MODE=${RESOLUTION_MODE}
+    USE_BLUETOOTH_CONTROLLER=${USE_BLUETOOTH_CONTROLLER}
     PICO_FLASH_SIZE_BYTES=0x200000  # (2097152, 2MB) - I need to define this or it may set to 4MB by default
 )
 
@@ -55,6 +90,14 @@ target_link_libraries(dmg
     hardware_dma
     hardware_flash
 )
+
+if(USE_BLUETOOTH_CONTROLLER STREQUAL "1")
+    target_link_libraries(dmg
+        pico_btstack_classic
+        pico_btstack_cyw43
+        pico_cyw43_arch_none
+    )
+endif()
 
 # Enable UART stdio and disable USB stdio
 # Force printf to use UART0 instead of USB

@@ -4,8 +4,19 @@ SET DRIVE_LETTER=D:
 @REM SET PLATFORM=rp2040
 @REM SET BOARD=pico
 SET PLATFORM=rp2350
-SET BOARD=pico2
+SET BOARD=pico2_w
 SET RESOLUTION_MODE=2
+SET USE_BLUETOOTH_CONTROLLER=1
+
+@REM Bluetooth builds require a wireless board such as pico_w or pico2_w.
+@REM Example:
+@REM   SET BOARD=pico2_w
+@REM   SET USE_BLUETOOTH_CONTROLLER=1
+
+REM Resolution modes:
+REM 0 = 640x480, horizontally scaled x4, vertically x3 --> 640x480 Full screen
+REM 1 = 800x600, horizontally scaled x4, vertically x4 --> 640x576 window
+REM 2 = 640x480, horizontally scaled x2, vertically x2 --> 320x288 window
 
 cd %~dp0
 rmdir /s /q build 2>nul
@@ -13,7 +24,7 @@ mkdir build
 cd build
 echo.
 echo ===== Running CMake Configuration =====
-cmake -G "MinGW Makefiles" -DPICO_COPY_TO_RAM=1 -DPICO_PLATFORM=%PLATFORM% -DPICO_BOARD=%BOARD% -DRESOLUTION_MODE=%RESOLUTION_MODE% ..
+cmake -G "MinGW Makefiles" -DPICO_COPY_TO_RAM=1 -DPICO_PLATFORM=%PLATFORM% -DPICO_BOARD=%BOARD% -DRESOLUTION_MODE=%RESOLUTION_MODE% -DUSE_BLUETOOTH_CONTROLLER=%USE_BLUETOOTH_CONTROLLER% ..
 if %errorlevel% neq 0 (
     echo.
     echo *** CMAKE CONFIGURATION FAILED ***

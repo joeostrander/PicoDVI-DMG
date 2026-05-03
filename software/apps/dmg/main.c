@@ -43,6 +43,10 @@ make improved OSD
 // #pragma GCC optimize("O2")
 #pragma GCC optimize("O3")
 
+#ifndef USE_BLUETOOTH_CONTROLLER
+#define USE_BLUETOOTH_CONTROLLER 0
+#endif
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +66,10 @@ make improved OSD
 #include "hardware/uart.h"
 #include "hardware/adc.h"
 #include "hardware/pwm.h"
+#if USE_BLUETOOTH_CONTROLLER
+#include "pico/cyw43_arch.h"
+#include "blue_host.h"
+#endif
 
 #include "eeprom.h" // emulated with flash :)
 #include "hardware/flash.h"
@@ -126,6 +134,21 @@ audio_sample_t audio_buffer[AUDIO_BUFFER_SIZE];
 #define SCL_PIN                         27
 #define I2C_ADDRESS                     0x52
 i2c_inst_t* i2cHandle = i2c1;
+
+#if USE_BLUETOOTH_CONTROLLER
+#ifndef BT_PAIR_BUTTON_GPIO
+#define BT_PAIR_BUTTON_GPIO             22u
+#endif
+#define BT_PAIRING_TIMEOUT_MS           60000u
+#define BT_PAIR_LONG_PRESS_MS           3000u
+#define BT_CFG_MAGIC                    0xBCu
+#define BT_CFG_VERSION                  1u
+#define BT_CFG_INDEX_MAGIC              240u
+#define BT_CFG_INDEX_VERSION            241u
+#define BT_CFG_INDEX_CONTROLLER_TYPE    242u
+#define BT_CFG_INDEX_REMOTE_ADDR        243u
+#define BT_CFG_INDEX_CHECKSUM           249u
+#endif
 
 #define SPLASH_DURATION_MS          3000u
 
@@ -225,6 +248,13 @@ static uint video_offset = 0;
 static uint8_t button_states[BUTTON_COUNT];
 static uint8_t button_states_previous[BUTTON_COUNT];
 
+#if USE_BLUETOOTH_CONTROLLER
+static bt_host_gamepad_report_t bt_latest_report;
+static bool bt_report_valid = false;
+static bool bt_controller_initialized = false;
+static bt_host_config_t bt_runtime_config;
+#endif
+
 struct dvi_inst dvi0;
 
 // RGB888 palettes - shared by both 640x480 and 800x600 modes
@@ -306,6 +336,22 @@ static void set_game_palette(int index);
 static void initialize_gpio(void);
 // static bool nes_classic_controller(void);
 static bool __no_inline_not_in_flash_func(nes_classic_controller)(void);
+#if USE_BLUETOOTH_CONTROLLER
+static bool init_bluetooth_controller(void);
+static void bluetooth_report_callback(const bt_host_gamepad_report_t *report);
+static void bluetooth_pairing_complete_callback(const uint8_t remote_addr[6]);
+static void bluetooth_pairing_reset_callback(void);
+static bool bt_load_paired_controller(bt_host_config_t *config);
+static bool bt_save_paired_controller(const bt_host_config_t *config);
+static void bt_clear_paired_controller(void);
+static uint8_t bt_config_checksum(const uint8_t remote_addr[6], uint8_t controller_type);
+static bool bt_address_is_unset(const uint8_t remote_addr[6]);
+static bool bt_controller_type_supported(uint8_t controller_type);
+static inline bool bt_hat_has_direction(uint8_t hat, controller_button_t button);
+static inline bool bt_axes_have_direction(const bt_host_gamepad_report_t *report, controller_button_t button);
+static inline bool bt_button_pressed(controller_button_t button);
+static bool __no_inline_not_in_flash_func(bluetooth_controller)(void);
+#endif
 static bool button_is_pressed(controller_button_t button);
 static bool button_was_released(controller_button_t button);
 static bool command_check(void);
@@ -597,7 +643,12 @@ static void initialize_gpio(void)
     gpio_init(DATA_1_PIN);
     gpio_init(HSYNC_PIN);
 
-    //Initialize I2C port at 400 kHz
+#if USE_BLUETOOTH_CONTROLLER
+    gpio_init(BT_PAIR_BUTTON_GPIO);
+    gpio_set_dir(BT_PAIR_BUTTON_GPIO, GPIO_IN);
+    gpio_pull_up(BT_PAIR_BUTTON_GPIO);
+#else
+    // Initialize I2C port at 400 kHz
     i2c_init(i2cHandle, 400 * 1000);
 
     // Initialize I2C pins
@@ -605,6 +656,7 @@ static void initialize_gpio(void)
     gpio_set_function(SDA_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(SCL_PIN);
     gpio_pull_up(SDA_PIN);
+#endif
 
     gpio_init(DMG_OUTPUT_RIGHT_A_PIN);
     gpio_set_dir(DMG_OUTPUT_RIGHT_A_PIN, GPIO_OUT);
@@ -628,6 +680,365 @@ static void initialize_gpio(void)
     gpio_init(DMG_READING_BUTTONS_PIN);
     gpio_set_dir(DMG_READING_BUTTONS_PIN, GPIO_IN);
 }
+
+#if USE_BLUETOOTH_CONTROLLER
+static uint8_t bt_config_checksum(const uint8_t remote_addr[6], uint8_t controller_type)
+{
+    uint8_t checksum = 0x5Au;
+
+    for (uint8_t i = 0; i < 6u; ++i) {
+        checksum ^= remote_addr[i];
+        checksum = (uint8_t)((checksum << 1) | (checksum >> 7));
+    }
+
+    checksum ^= controller_type;
+    return checksum;
+}
+
+static bool bt_address_is_unset(const uint8_t remote_addr[6])
+{
+    for (uint8_t i = 0; i < 6u; ++i) {
+        if (remote_addr[i] != 0u) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool bt_controller_type_supported(uint8_t controller_type)
+{
+    switch (controller_type) {
+        case BT_HOST_CONTROLLER_GENERIC:
+        case BT_HOST_CONTROLLER_PS4:
+        case BT_HOST_CONTROLLER_EIGHT_BITDO:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool bt_load_paired_controller(bt_host_config_t *config)
+{
+    uint8_t magic = 0;
+    uint8_t version = 0;
+    uint8_t controller_type = 0;
+    uint8_t remote_addr[6] = {0};
+    uint8_t checksum = 0;
+
+    if (config == NULL) {
+        return false;
+    }
+
+    if (EEPROM_read(BT_CFG_INDEX_MAGIC, &magic) != EEPROM_SUCCESS ||
+        EEPROM_read(BT_CFG_INDEX_VERSION, &version) != EEPROM_SUCCESS ||
+        EEPROM_read(BT_CFG_INDEX_CONTROLLER_TYPE, &controller_type) != EEPROM_SUCCESS ||
+        EEPROM_read(BT_CFG_INDEX_CHECKSUM, &checksum) != EEPROM_SUCCESS) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < 6u; ++i) {
+        if (EEPROM_read((uint8_t)(BT_CFG_INDEX_REMOTE_ADDR + i), &remote_addr[i]) != EEPROM_SUCCESS) {
+            return false;
+        }
+    }
+
+    if (magic != BT_CFG_MAGIC || version != BT_CFG_VERSION) {
+        return false;
+    }
+
+    if (!bt_controller_type_supported(controller_type)) {
+        return false;
+    }
+
+    if (bt_address_is_unset(remote_addr)) {
+        return false;
+    }
+
+    if (checksum != bt_config_checksum(remote_addr, controller_type)) {
+        return false;
+    }
+
+    memcpy(config->remote_addr, remote_addr, sizeof(config->remote_addr));
+    config->controller_type = (bt_host_controller_type_t)controller_type;
+    return true;
+}
+
+static bool bt_save_paired_controller(const bt_host_config_t *config)
+{
+    uint8_t controller_type;
+    uint8_t checksum;
+
+    if (config == NULL) {
+        return false;
+    }
+
+    controller_type = (uint8_t)config->controller_type;
+    checksum = bt_config_checksum(config->remote_addr, controller_type);
+
+    if (!bt_controller_type_supported(controller_type)) {
+        return false;
+    }
+
+    if (bt_address_is_unset(config->remote_addr)) {
+        return false;
+    }
+
+    if (EEPROM_write(BT_CFG_INDEX_MAGIC, BT_CFG_MAGIC) != EEPROM_SUCCESS ||
+        EEPROM_write(BT_CFG_INDEX_VERSION, BT_CFG_VERSION) != EEPROM_SUCCESS ||
+        EEPROM_write(BT_CFG_INDEX_CONTROLLER_TYPE, controller_type) != EEPROM_SUCCESS) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < 6u; ++i) {
+        if (EEPROM_write((uint8_t)(BT_CFG_INDEX_REMOTE_ADDR + i), config->remote_addr[i]) != EEPROM_SUCCESS) {
+            return false;
+        }
+    }
+
+    if (EEPROM_write(BT_CFG_INDEX_CHECKSUM, checksum) != EEPROM_SUCCESS) {
+        return false;
+    }
+
+    return EEPROM_commit() == EEPROM_SUCCESS;
+}
+
+static void bt_clear_paired_controller(void)
+{
+    for (uint8_t i = 0; i < 6u; ++i) {
+        (void)EEPROM_write((uint8_t)(BT_CFG_INDEX_REMOTE_ADDR + i), 0u);
+    }
+
+    (void)EEPROM_write(BT_CFG_INDEX_CONTROLLER_TYPE, (uint8_t)BT_HOST_CONTROLLER_GENERIC);
+    (void)EEPROM_write(BT_CFG_INDEX_MAGIC, 0u);
+    (void)EEPROM_write(BT_CFG_INDEX_VERSION, 0u);
+    (void)EEPROM_write(BT_CFG_INDEX_CHECKSUM, 0u);
+    (void)EEPROM_commit();
+}
+
+static void bluetooth_report_callback(const bt_host_gamepad_report_t *report)
+{
+    if (report == NULL) {
+        return;
+    }
+
+    bt_latest_report = *report;
+    bt_report_valid = true;
+}
+
+static void bluetooth_pairing_complete_callback(const uint8_t remote_addr[6])
+{
+    if (remote_addr == NULL) {
+        return;
+    }
+
+    memcpy(bt_runtime_config.remote_addr, remote_addr, sizeof(bt_runtime_config.remote_addr));
+
+    printf("Bluetooth paired: %02X:%02X:%02X:%02X:%02X:%02X\n",
+           remote_addr[0],
+           remote_addr[1],
+           remote_addr[2],
+           remote_addr[3],
+           remote_addr[4],
+           remote_addr[5]);
+
+    if (bt_save_paired_controller(&bt_runtime_config)) {
+        printf("Saved paired controller to EEPROM\n");
+    } else {
+        printf("Failed to save paired controller to EEPROM\n");
+    }
+}
+
+static void bluetooth_pairing_reset_callback(void)
+{
+    memset(bt_runtime_config.remote_addr, 0, sizeof(bt_runtime_config.remote_addr));
+    bt_clear_paired_controller();
+    bt_report_valid = false;
+    reset_button_states();
+    printf("Bluetooth pairing reset requested (saved pairing cleared)\n");
+}
+
+static bool init_bluetooth_controller(void)
+{
+    bool pair_button_held;
+    bool has_saved_controller;
+
+    memset(&bt_runtime_config, 0, sizeof(bt_runtime_config));
+    bt_runtime_config.controller_type = BT_HOST_CONTROLLER_GENERIC;
+    bt_runtime_config.pairing_timeout_ms = BT_PAIRING_TIMEOUT_MS;
+    bt_runtime_config.pair_button_gpio = BT_PAIR_BUTTON_GPIO;
+    bt_runtime_config.pair_button_active_low = true;
+    bt_runtime_config.pair_button_long_press_ms = BT_PAIR_LONG_PRESS_MS;
+
+    sleep_ms(20);
+    pair_button_held = gpio_get(BT_PAIR_BUTTON_GPIO) == 0;
+    has_saved_controller = bt_load_paired_controller(&bt_runtime_config);
+
+    if (pair_button_held || !has_saved_controller) {
+        bt_runtime_config.start_mode = BT_HOST_START_MODE_PAIRING;
+        bt_runtime_config.clear_bonding_on_start = true;
+        memset(bt_runtime_config.remote_addr, 0, sizeof(bt_runtime_config.remote_addr));
+
+        if (pair_button_held) {
+            bt_clear_paired_controller();
+            printf("Pair button held on boot: entering pairing mode\n");
+        } else {
+            printf("No saved controller: entering pairing mode\n");
+        }
+    } else {
+        bt_runtime_config.start_mode = BT_HOST_START_MODE_NORMAL;
+        bt_runtime_config.clear_bonding_on_start = false;
+        printf("Loaded saved controller, connecting without re-pair\n");
+    }
+
+    if (cyw43_arch_init() != 0) {
+        printf("Bluetooth init failed: cyw43_arch_init()\n");
+        return false;
+    }
+
+    btstack_host_start_non_blocking(&bt_runtime_config,
+                                    bluetooth_report_callback,
+                                    bluetooth_pairing_complete_callback,
+                                    bluetooth_pairing_reset_callback);
+    bt_controller_initialized = true;
+    printf("Bluetooth host started (non-blocking)\n");
+    return true;
+}
+
+static inline bool bt_hat_has_direction(uint8_t hat, controller_button_t button)
+{
+    switch (button) {
+        case BUTTON_UP:
+            return (hat == 0u) || (hat == 1u) || (hat == 7u);
+        case BUTTON_RIGHT:
+            return (hat == 1u) || (hat == 2u) || (hat == 3u);
+        case BUTTON_DOWN:
+            return (hat == 3u) || (hat == 4u) || (hat == 5u);
+        case BUTTON_LEFT:
+            return (hat == 5u) || (hat == 6u) || (hat == 7u);
+        default:
+            return false;
+    }
+}
+
+static inline bool bt_axes_have_direction(const bt_host_gamepad_report_t *report, controller_button_t button)
+{
+    const bool left = report->lx < 64u;
+    const bool right = report->lx > 192u;
+    const bool up = report->ly < 64u;
+    const bool down = report->ly > 192u;
+
+    switch (button) {
+        case BUTTON_UP:
+            return up;
+        case BUTTON_RIGHT:
+            return right;
+        case BUTTON_DOWN:
+            return down;
+        case BUTTON_LEFT:
+            return left;
+        default:
+            return false;
+    }
+}
+
+static inline bool bt_button_pressed(controller_button_t button)
+{
+    if (!bt_report_valid) {
+        return false;
+    }
+
+    const bt_host_gamepad_report_t *report = &bt_latest_report;
+    switch (button) {
+        case BUTTON_UP:
+        case BUTTON_DOWN:
+        case BUTTON_LEFT:
+        case BUTTON_RIGHT:
+            if (report->dpad <= 7u) {
+                return bt_hat_has_direction(report->dpad, button);
+            }
+            return bt_axes_have_direction(report, button);
+        case BUTTON_A:
+            if (report->controller_type == BT_HOST_CONTROLLER_PS4) {
+                return (report->buttons_primary & (1u << 5)) != 0;
+            }
+            if (report->controller_type == BT_HOST_CONTROLLER_GENERIC) {
+                return (report->buttons_primary & (1u << 4)) != 0;
+            }
+            return (report->buttons_primary & (1u << 0)) != 0;
+        case BUTTON_B:
+            if (report->controller_type == BT_HOST_CONTROLLER_PS4) {
+                return (report->buttons_primary & (1u << 6)) != 0;
+            }
+            if (report->controller_type == BT_HOST_CONTROLLER_GENERIC) {
+                return (report->buttons_primary & (1u << 5)) != 0;
+            }
+            return (report->buttons_primary & (1u << 1)) != 0;
+        case BUTTON_SELECT:
+            if (report->controller_type == BT_HOST_CONTROLLER_PS4) {
+                return (report->buttons_secondary & (1u << 4)) != 0;
+            }
+            if (report->controller_type == BT_HOST_CONTROLLER_GENERIC) {
+                return (report->buttons_secondary & (1u << 4)) != 0;
+            }
+            return (report->buttons_primary & (1u << 2)) != 0;
+        case BUTTON_START:
+            if (report->controller_type == BT_HOST_CONTROLLER_PS4) {
+                return (report->buttons_secondary & (1u << 5)) != 0;
+            }
+            if (report->controller_type == BT_HOST_CONTROLLER_GENERIC) {
+                return (report->buttons_secondary & (1u << 5)) != 0;
+            }
+            return (report->buttons_primary & (1u << 3)) != 0;
+        case BUTTON_HOME:
+            if (report->controller_type == BT_HOST_CONTROLLER_PS4) {
+                return (report->buttons_tertiary & (1u << 0)) != 0;
+            }
+            if (report->controller_type == BT_HOST_CONTROLLER_GENERIC) {
+                return (report->buttons_secondary & (1u << 6)) != 0;
+            }
+            return (report->buttons_secondary & (1u << 0)) != 0;
+        default:
+            return false;
+    }
+}
+
+static bool __no_inline_not_in_flash_func(bluetooth_controller)(void)
+{
+    static uint32_t last_micros = 0;
+
+    if (bt_controller_initialized) {
+        btstack_host_poll();
+    }
+
+    uint32_t current_micros = time_us_32();
+    if (current_micros - last_micros < 5000) {
+        return false;
+    }
+    last_micros = current_micros;
+
+    if (!bt_report_valid) {
+        reset_button_states();
+        return false;
+    }
+
+    for (int i = 0; i < BUTTON_COUNT; ++i) {
+        const bool pressed = bt_button_pressed((controller_button_t)i);
+        button_states[i] = pressed ? BUTTON_STATE_PRESSED : BUTTON_STATE_UNPRESSED;
+    }
+
+    bool any_pressed = false;
+    for (uint8_t i = 0; i < BUTTON_COUNT; i++) {
+        if (button_states[i] == BUTTON_STATE_PRESSED) {
+            any_pressed = true;
+            break;
+        }
+    }
+    gpio_put(ONBOARD_LED_PIN, any_pressed);
+
+    return true;
+}
+#endif
 
 // static bool nes_classic_controller(void)
 static bool __no_inline_not_in_flash_func(nes_classic_controller)(void)
@@ -1316,6 +1727,12 @@ int main(void)
     initialize_gpio();
     boot_checkpoint("GPIO initialized");
 
+#if USE_BLUETOOTH_CONTROLLER
+    if (!init_bluetooth_controller()) {
+        printf("Bluetooth controller initialization failed; continuing without Bluetooth input.\n");
+    }
+#endif
+
     for (int i = 0; i < 5; i++) {
         printf("\n\n=== PicoDVI-DMG_EMU Starting (attempt %d) ===\n", i + 1);
         sleep_ms(100);
@@ -1456,7 +1873,11 @@ int main(void)
         absolute_time_t now = get_absolute_time();
         if (time_reached(controller_poll_enable_time) && time_reached(next_controller_poll)) 
         {
+#if USE_BLUETOOTH_CONTROLLER
+            bluetooth_controller();
+#else
             nes_classic_controller();
+#endif
             (void)command_check();
             button_state_save_previous();
             next_controller_poll = delayed_by_ms(now, 5);  // ~200 Hz
